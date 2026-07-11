@@ -1,0 +1,38 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A streaming tools suite: a FastAPI backend plus a Vue 3 frontend that serves both a control panel (`/control`) and browser-source overlay pages for OBS (e.g. `/overlay/alert`). Overlay views need transparent backgrounds — note that `<style scoped>` cannot style `body`; use a global style or `:global(body)` for that.
+
+## Running the app
+
+Both servers must run simultaneously; the browser only talks to Vite, which proxies `/api` and `/ws` to the backend on port 8000 (see `frontend/vite.config.ts`).
+
+Backend (FastAPI on :8000):
+```sh
+cd backend && source venv/bin/activate && fastapi dev main.py
+```
+
+Frontend (Vite on :5173):
+```sh
+cd frontend && npm run dev
+```
+
+Other frontend commands (run from `frontend/`):
+- `npm run type-check` — vue-tsc; run this to verify TS changes
+- `npm run build` — type-check + production build
+
+There are no tests or linter configured yet, in either half.
+
+## Architecture notes
+
+- `backend/main.py` is the entire backend. All routes are prefixed `/api` (and websockets `/ws`) so the Vite proxy picks them up — don't add unprefixed routes.
+- Backend dependencies live only in `backend/venv` (no `requirements.txt`). Install new packages with `backend/venv/bin/pip` and consider generating a requirements file when adding one.
+- Frontend is a standard Vue 3 + TypeScript + Pinia + vue-router scaffold; routes are declared in `frontend/src/router/index.ts`, views in `frontend/src/views/`.
+
+## Gotchas
+
+- Every `.vue` file with a script block must use `<script setup lang="ts">`. Plain `<script setup>` compiles fine but breaks `vue-tsc` with TS7016 ("could not find a declaration file") at the import site, because `allowJs` is off.
+- The git remote must stay HTTPS (`https://github.com/Sanguine-Hexcraft/sang_suite.git`) with `gh` as the credential helper — this network silently drops SSH connections to GitHub, so SSH remotes hang forever rather than erroring.

@@ -15,8 +15,8 @@ coverage
 *.local
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+**/.vscode/*
+!**/.vscode/extensions.json
 .idea
 *.suo
 *.ntvs*
@@ -29,8 +29,8 @@ coverage
 .eslintcache
 
 # Cypress
-/cypress/videos/
-/cypress/screenshots/
+**/cypress/videos/
+**/cypress/screenshots/
 
 # Vitest
 __screenshots__/
