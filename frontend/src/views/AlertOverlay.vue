@@ -30,12 +30,16 @@ onMounted(() => {
 
 <style scoped>
 .alert {
-  color: white;
-  font-size: 3rem;
+  color: red;
+  font-size: 8rem;
   text-shadow: 0 0 10px black;
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
 }
 
-body {
+:global(body) {
   background: transparent;
 }
 </style>
