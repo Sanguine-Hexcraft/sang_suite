@@ -35,4 +35,4 @@ There are no tests or linter configured yet, in either half.
 ## Gotchas
 
 - Every `.vue` file with a script block must use `<script setup lang="ts">`. Plain `<script setup>` compiles fine but breaks `vue-tsc` with TS7016 ("could not find a declaration file") at the import site, because `allowJs` is off.
-- The git remote must stay HTTPS (`https://github.com/Sanguine-Hexcraft/sang_suite.git`) with `gh` as the credential helper — this network silently drops SSH connections to GitHub, so SSH remotes hang forever rather than erroring.
+- On one specific machine (a Fedora box / its network), SSH connections to GitHub are silently dropped, so an SSH remote hangs forever rather than erroring. If pushing hangs there, switch the remote to HTTPS (`https://github.com/Sanguine-Hexcraft/sang_suite.git`) with `gh` as the credential helper. SSH works fine on other machines — this is not a universal rule.
