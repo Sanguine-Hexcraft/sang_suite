@@ -29,6 +29,8 @@ There are no tests or linter configured yet, in either half.
 ## Architecture notes
 
 - `backend/main.py` is the entire backend. All routes are prefixed `/api` (and websockets `/ws`) so the Vite proxy picks them up — don't add unprefixed routes.
+- Two distinct websockets: `/ws` is a server the browser dials into (the alert relay); the `OBSController` in `main.py` is a client that dials OUT to OBS's own websocket (`ws://localhost:4455`) to control scenes/sources. Both live in `main.py`.
+- OBS control reads `OBS_WS_URL` / `OBS_WS_PASSWORD` from `backend/.env` (loaded by a tiny dependency-free reader; `.env` is gitignored). Copy `backend/.env.example` to `backend/.env` and fill it in. The backend starts fine without OBS running — connection is lazy and only errors on a control button press.
 - Backend dependencies are pinned in `backend/requirements.txt`. On a fresh pull, rebuild the venv with `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`. When you add a package, install it into the venv and regenerate the pin (keep the `fastapi[standard]` extra).
 - Frontend is a standard Vue 3 + TypeScript + Pinia + vue-router scaffold; routes are declared in `frontend/src/router/index.ts`, views in `frontend/src/views/`.
 

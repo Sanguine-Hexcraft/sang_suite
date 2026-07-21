@@ -46,3 +46,6 @@ playwright-report/
 venv/
 __pycache__/
 *.pyc
+
+# Secrets / local config
+.env
