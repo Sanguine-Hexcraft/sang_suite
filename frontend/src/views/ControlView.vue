@@ -64,3 +64,14 @@ async function callObs(path: string, body: object) {
     <p>OBS: {{ obsStatus }}</p>
   </main>
 </template>
+
+<style scoped>
+
+main {
+  color: white;
+  background-color: purple;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+</style>
