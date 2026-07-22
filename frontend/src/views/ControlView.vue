@@ -71,7 +71,7 @@ main {
   color: white;
   background-color: purple;
   min-height: 100vh;
-  padding: 20px;
+  padding: 20px
 }
 
 </style>
