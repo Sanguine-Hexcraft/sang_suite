@@ -21,6 +21,9 @@ export const useOverlayStore = defineStore('overlay', () => {
       connected.value = false
       setTimeout(connect, 2000) // auto-reconnect
     }
+    // An error doesn't always fire onclose on its own, so close explicitly
+    // to funnel it into the same reconnect loop above.
+    socket.onerror = () => socket?.close()
     socket.onmessage = (e) => (lastEvent.value = JSON.parse(e.data))
   }
 

@@ -5,13 +5,17 @@ import { useOverlayStore } from '@/stores/overlay'
 const store = useOverlayStore()
 const alertShowing = ref(false)
 const alertText = ref('')
+let hideTimer: ReturnType<typeof setTimeout> | undefined
 
 watch(() => store.lastEvent, (event) => {
   // steps go here
   if (event?.type !== 'alert') return
   alertShowing.value = true
   alertText.value = event.text ?? ''
-  setTimeout(() => {
+  // Cancel any in-flight hide so a new alert gets its full 4s
+  // instead of being cut short by the previous alert's timer.
+  clearTimeout(hideTimer)
+  hideTimer = setTimeout(() => {
     alertShowing.value = false
   }, 4000)
 })
