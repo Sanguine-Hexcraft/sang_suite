@@ -17,7 +17,7 @@ watch(() => store.lastEvent, (event) => {
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
     alertShowing.value = false
-  }, 4000)
+  }, 8000)
 })
 
 onMounted(() => {

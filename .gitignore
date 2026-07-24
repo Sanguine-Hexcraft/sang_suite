@@ -49,3 +49,5 @@ __pycache__/
 
 # Secrets / local config
 .env
+# Cached Twitch user + refresh token — as sensitive as a password.
+.twitch_tokens.json

@@ -7,6 +7,8 @@ import simpleobsws
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from twitch import TwitchAlerts
+
 
 # --- config -----------------------------------------------------------------
 def _load_env(path: str = ".env") -> None:
@@ -98,7 +100,15 @@ async def lifespan(app: FastAPI):
         await obs._ready_client()
     except (ConnectionError, OSError):
         pass
+    # Twitch is optional in the same way: missing credentials or an auth
+    # failure means no automatic alerts, not a dead backend. Deliberately
+    # broad — nothing Twitch does should be able to stop the server booting.
+    try:
+        await twitch_alerts.start()
+    except Exception as exc:
+        print(f"[twitch] Startup failed, alerts disabled: {exc}")
     yield
+    await twitch_alerts.stop()
     await obs.disconnect()
 
 
@@ -123,6 +133,12 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+# Twitch events feed straight into the same relay the control panel uses, so
+# an automatic follow alert and a manually-triggered one are indistinguishable
+# to the overlay. Defined here (not above lifespan) because it needs `manager`;
+# lifespan only looks it up when the server actually starts.
+twitch_alerts = TwitchAlerts(manager.broadcast)
 
 
 @app.get("/api/health")
