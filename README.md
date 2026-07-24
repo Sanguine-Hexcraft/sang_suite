@@ -168,5 +168,5 @@ Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roa
 - [x] **Phase 4** — WebSocket alert relay
 - [x] **Phase 5** — overlay running live in OBS
 - [x] **Phase 6** — OBS control from Python
-- [ ] **Phase 7** — Twitch EventSub (follows/subs fire alerts automatically)
+- [x] **Phase 7** — Twitch EventSub (follows/subs fire alerts automatically)
 - [ ] **Phase 8** — persistence and a single-process production build

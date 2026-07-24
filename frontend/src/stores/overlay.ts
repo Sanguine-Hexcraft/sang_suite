@@ -4,6 +4,13 @@ import { ref } from 'vue'
 export interface OverlayEvent {
   type: string
   text?: string
+  // Added in Phase 7. The overlay only needs type/text to render, but Twitch
+  // alerts also carry these so views can style per-event later without a change
+  // to the backend. kind = follow | sub | cheer | raid; amount = bits / raid
+  // viewers / sub tier, or null when the event has no number.
+  kind?: string
+  user?: string
+  amount?: number | null
 }
 
 export const useOverlayStore = defineStore('overlay', () => {
