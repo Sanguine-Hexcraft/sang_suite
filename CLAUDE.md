@@ -36,5 +36,6 @@ There are no tests or linter configured yet, in either half.
 
 ## Gotchas
 
+- The dev machine runs **Bazzite**, an atomic (image-based) Fedora derivative — `uname` reports `fc44`, but it is *not* ordinary Fedora. The base image is read-only, so **`dnf install` does not work**. Install CLI tooling with `brew` (Homebrew ships with Bazzite); reserve `rpm-ostree install` for things that genuinely must be layered into the image, since it needs a reboot. Don't suggest `dnf` here.
 - Every `.vue` file with a script block must use `<script setup lang="ts">`. Plain `<script setup>` compiles fine but breaks `vue-tsc` with TS7016 ("could not find a declaration file") at the import site, because `allowJs` is off.
 - On one specific machine (a Fedora box / its network), SSH connections to GitHub are silently dropped, so an SSH remote hangs forever rather than erroring. If pushing hangs there, switch the remote to HTTPS (`https://github.com/Sanguine-Hexcraft/sang_suite.git`) with `gh` as the credential helper. SSH works fine on other machines — this is not a universal rule.
