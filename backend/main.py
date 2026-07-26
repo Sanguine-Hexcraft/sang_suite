@@ -2,10 +2,13 @@ import json
 import os
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import simpleobsws
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from twitch import TwitchAlerts
 
@@ -32,6 +35,62 @@ _load_env()
 
 OBS_WS_URL = os.getenv("OBS_WS_URL", "ws://localhost:4455")
 OBS_WS_PASSWORD = os.getenv("OBS_WS_PASSWORD")  # None = connect without auth
+
+
+# --- widget settings (Phase 8) ----------------------------------------------
+# Distinct from .env above: that's secrets and machine wiring, this is the
+# stuff you tweak while streaming. Every field has a default, so the app runs
+# with no config.json at all and only writes one once you save from /control.
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+class AlertKindConfig(BaseModel):
+    label: str
+    # Hex only — the overlay splits this into an "r g b" triple to feed
+    # rgb(var(--accent) / alpha), and a plain hex is what an <input
+    # type="color"> on the control panel produces.
+    accent: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+DEFAULT_KINDS = {
+    "follow": AlertKindConfig(label="NEW FOLLOWER", accent="#b06bff"),
+    "sub": AlertKindConfig(label="NEW SUBSCRIBER", accent="#ffd166"),
+    "cheer": AlertKindConfig(label="BITS INCOMING", accent="#4dd6ff"),
+    "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00"),
+    # Manual alerts from /control arrive with no `kind` and land here.
+    "generic": AlertKindConfig(label="ALERT", accent="#ff2d55"),
+}
+
+
+class AlertConfig(BaseModel):
+    # Bounded so a typo in config.json can't wedge an alert on screen forever.
+    duration_ms: int = Field(default=8000, ge=500, le=60_000)
+    kinds: dict[str, AlertKindConfig] = DEFAULT_KINDS
+
+
+class Config(BaseModel):
+    alerts: AlertConfig = AlertConfig()
+
+
+def load_config() -> Config:
+    """Read config.json, falling back to defaults if it's missing or broken.
+
+    A malformed file shouldn't stop the server booting mid-stream — same
+    graceful-degradation stance as OBS and Twitch being unreachable.
+    """
+    if CONFIG_PATH.exists():
+        try:
+            return Config.model_validate_json(CONFIG_PATH.read_text())
+        except (ValueError, OSError) as exc:
+            print(f"[config] {CONFIG_PATH.name} unusable, using defaults: {exc}")
+    return Config()
+
+
+def save_config(cfg: Config) -> None:
+    CONFIG_PATH.write_text(cfg.model_dump_json(indent=2) + "\n")
+
+
+config = load_config()
 
 
 # --- OBS control ------------------------------------------------------------
@@ -146,6 +205,26 @@ async def health():
     return {"status": "ok"}
 
 
+# --- widget settings endpoints (Phase 8) ------------------------------------
+@app.get("/api/config")
+async def get_config() -> Config:
+    return config
+
+
+@app.put("/api/config")
+async def put_config(new: Config) -> Config:
+    """Replace the whole config, persist it, and push it to open overlays.
+
+    The broadcast reuses the Phase 4 relay, so a colour change lands in OBS
+    immediately — no need to refresh the browser source mid-stream.
+    """
+    global config
+    config = new
+    save_config(config)
+    await manager.broadcast({"type": "config", "config": config.model_dump()})
+    return config
+
+
 # --- OBS control endpoints (Phase 6) ----------------------------------------
 class SceneRequest(BaseModel):
     scene: str
@@ -203,3 +282,40 @@ async def websocket_endpoint(ws: WebSocket):
             await manager.broadcast(data)
     except WebSocketDisconnect:
         manager.disconnect(ws)
+
+
+# --- serve the built frontend (Phase 8) -------------------------------------
+# Mounted LAST, at "/", so every route above still wins. In development this
+# directory doesn't exist and the block is skipped — you keep using Vite on
+# :5173, which proxies /api and /ws back here.
+DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html instead of 404ing.
+
+    /control and /overlay/alert are client-side routes with no matching file
+    on disk, so a plain mount 404s on a hard refresh. Handing unknown paths to
+    index.html lets vue-router take over once the page boots.
+    """
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # StaticFiles signals a miss by raising, not by returning a 404
+            # response — so this has to be a try/except, not a status check.
+            if exc.status_code != 404:
+                raise
+            # Let unmatched API paths 404 properly. Without this a typo'd
+            # endpoint returns index.html, and the caller's res.json() fails
+            # on "<!DOCTYPE html>" instead of reporting a missing route.
+            if path.startswith("api/"):
+                raise
+            return await super().get_response("index.html", scope)
+
+
+if DIST.is_dir():
+    app.mount("/", SPAStaticFiles(directory=DIST, html=True), name="spa")
+else:
+    print(f"[static] No build at {DIST} — run 'npm run build' to serve the UI.")

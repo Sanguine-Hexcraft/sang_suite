@@ -28,7 +28,9 @@ There are no tests or linter configured yet, in either half.
 
 ## Architecture notes
 
-- `backend/main.py` is the entire backend. All routes are prefixed `/api` (and websockets `/ws`) so the Vite proxy picks them up — don't add unprefixed routes.
+- `backend/main.py` holds everything except the Twitch EventSub client (`backend/twitch.py`). All routes are prefixed `/api` (and websockets `/ws`) so the Vite proxy picks them up — don't add unprefixed routes.
+- In production the backend also serves `frontend/dist/` at `/` via an SPA-aware `StaticFiles` mount. It is registered at the *bottom* of `main.py` on purpose — a mount at `/` shadows anything declared after it, so new routes must go above it. Note that Starlette's `StaticFiles` signals a miss by *raising* `HTTPException(404)` rather than returning a 404 response, which is why the fallback is a `try/except` and not a status check.
+- Widget settings (alert duration, per-kind labels and accent colours) live in `backend/config.json`, gitignored, with defaults in the Pydantic models. `PUT /api/config` saves and then broadcasts the new config over `/ws`, so overlays update live; the frontend store routes `type: 'config'` messages to `config` and everything else to `lastEvent`.
 - Two distinct websockets: `/ws` is a server the browser dials into (the alert relay); the `OBSController` in `main.py` is a client that dials OUT to OBS's own websocket (`ws://localhost:4455`) to control scenes/sources. Both live in `main.py`.
 - OBS control reads `OBS_WS_URL` / `OBS_WS_PASSWORD` from `backend/.env` (loaded by a tiny dependency-free reader; `.env` is gitignored). Copy `backend/.env.example` to `backend/.env` and fill it in. The backend starts fine without OBS running — connection is lazy and only errors on a control button press.
 - Backend dependencies are pinned in `backend/requirements.txt`. On a fresh pull, rebuild the venv with `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`. When you add a package, install it into the venv and regenerate the pin (keep the `fastapi[standard]` extra).

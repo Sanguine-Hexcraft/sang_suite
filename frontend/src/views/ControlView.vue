@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useOverlayStore } from '@/stores/overlay'
+import { ref, onMounted, toRaw } from 'vue'
+import { useOverlayStore, type AppConfig } from '@/stores/overlay'
 
 // status: a reactive container, starting as '...'.
 // "Reactive" = when its value changes, Vue re-renders anything
@@ -21,6 +21,32 @@ onMounted(async () => {
   const res = await fetch('/api/health')
   status.value = (await res.json()).status
 })
+
+// --- widget settings (Phase 8) ---
+// Edited against a local draft rather than the store, so a half-typed colour
+// doesn't get pushed to the overlay until you actually hit Save.
+const draft = ref<AppConfig | null>(null)
+const configStatus = ref('')
+
+onMounted(async () => {
+  await store.loadConfig()
+  draft.value = structuredClone(toRaw(store.config))
+})
+
+async function saveConfig() {
+  configStatus.value = 'saving…'
+  try {
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft.value),
+    })
+    const data = await res.json()
+    configStatus.value = res.ok ? 'saved' : `error: ${JSON.stringify(data.detail)}`
+  } catch (e) {
+    configStatus.value = `network error: ${e}`
+  }
+}
 
 // --- OBS control (Phase 6) ---
 // Editable so you can point them at whatever your OBS actually has.
@@ -52,6 +78,21 @@ async function callObs(path: string, body: object) {
     <p>Backend: {{ status }}</p>
     <p>WS: {{ store.connected }}</p>
     <button @click="store.send({ type: 'alert', text: 'New Follower: Innoruuk' })">Send Alert</button>
+
+    <h2>Alert Settings</h2>
+    <template v-if="draft">
+      <p>
+        Duration (ms):
+        <input v-model.number="draft.alerts.duration_ms" type="number" min="500" max="60000" />
+      </p>
+      <p v-for="(kind, name) in draft.alerts.kinds" :key="name">
+        <strong>{{ name }}</strong>
+        <input v-model="kind.label" />
+        <input v-model="kind.accent" type="color" />
+      </p>
+      <button @click="saveConfig">Save Settings</button>
+      <p>Config: {{ configStatus }}</p>
+    </template>
 
     <h2>OBS Control</h2>
     <p>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useOverlayStore } from '@/stores/overlay'
+import { useOverlayStore, type AlertKindConfig } from '@/stores/overlay'
 
 const store = useOverlayStore()
 const alertShowing = ref(false)
@@ -8,39 +8,49 @@ const alertText = ref('')
 const alertKind = ref('')
 let hideTimer: ReturnType<typeof setTimeout> | undefined
 
-// Banner above the message. Manual alerts from the control panel arrive with
-// no `kind`, so they fall through to the generic label.
-const HEADLINES: Record<string, string> = {
-  follow: 'NEW FOLLOWER',
-  sub: 'NEW SUBSCRIBER',
-  cheer: 'BITS INCOMING',
-  raid: 'INCOMING RAID',
-}
-const headline = computed(() => HEADLINES[alertKind.value] ?? 'ALERT')
+// Used only in the gap before /api/config answers, or if it fails outright —
+// an alert firing in that window should still be legible rather than unstyled.
+const FALLBACK: AlertKindConfig = { label: 'ALERT', accent: '#ff2d55' }
+const FALLBACK_DURATION_MS = 8000
+
+// Manual alerts from the control panel arrive with no `kind`, so they fall
+// through to the 'generic' entry.
+const kindConfig = computed<AlertKindConfig>(
+  () => store.config?.alerts.kinds[alertKind.value || 'generic'] ?? FALLBACK,
+)
+const headline = computed(() => kindConfig.value.label)
+
+// The CSS composes glows as rgb(var(--accent) / alpha), which needs the
+// channels bare rather than as a hex literal.
+const accent = computed(() => {
+  const n = parseInt(kindConfig.value.accent.slice(1), 16)
+  return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`
+})
 
 watch(() => store.lastEvent, (event) => {
   if (event?.type !== 'alert') return
   alertText.value = event.text ?? ''
   alertKind.value = event.kind ?? ''
   alertShowing.value = true
-  // Cancel any in-flight hide so a new alert gets its full 8s
+  // Cancel any in-flight hide so a new alert gets its full duration
   // instead of being cut short by the previous alert's timer.
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
     alertShowing.value = false
-  }, 8000)
+  }, store.config?.alerts.duration_ms ?? FALLBACK_DURATION_MS)
 })
 
 onMounted(() => {
   store.connect()
+  store.loadConfig()
 })
 </script>
 
 
 <template>
   <Transition name="pop">
-    <div v-if="alertShowing" class="alert" :class="`kind-${alertKind || 'generic'}`">
-      <div class="card">
+    <div v-if="alertShowing" class="alert">
+      <div class="card" :style="{ '--accent': accent }">
         <p class="headline">{{ headline }}</p>
         <p class="message">{{ alertText }}</p>
       </div>
@@ -72,7 +82,8 @@ onMounted(() => {
   pointer-events: none;
 }
 
-/* Accent as an "r g b" triple so it can drive both solid and alpha colours. */
+/* --accent is set inline from config as an "r g b" triple, so it can drive
+   both solid and alpha colours. The value here is only a safety net. */
 .card {
   --accent: 255 45 85;
   padding: 33px 55px;
@@ -83,12 +94,6 @@ onMounted(() => {
     inset 0 0 33px rgb(var(--accent) / 0.18),
     0 0 44px rgb(var(--accent) / 0.45);
 }
-
-.kind-follow .card { --accent: 176 107 255; }
-.kind-sub    .card { --accent: 255 209 102; }
-.kind-cheer  .card { --accent: 77 214 255; }
-.kind-raid   .card { --accent: 255 122 0; }
-/* kind-generic keeps the crimson default. */
 
 .headline {
   margin: 0 0 11px;

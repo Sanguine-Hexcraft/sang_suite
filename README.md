@@ -114,11 +114,27 @@ hand every time the overlay changes.
 | Method | Endpoint | Body | Description |
 |---|---|---|---|
 | `GET` | `/api/health` | — | Health check, returns `{"status": "ok"}` |
+| `GET` | `/api/config` | — | Current widget settings |
+| `PUT` | `/api/config` | full config object | Replace settings, save to disk, push to overlays |
 | `POST` | `/api/obs/scene` | `{"scene": "..."}` | Switch the active OBS scene |
 | `POST` | `/api/obs/source` | `{"scene": "...", "source": "...", "visible": true}` | Show/hide a source |
 | `WS` | `/ws` | — | Alert relay; messages are broadcast to all connected clients |
 
 Alert messages are plain JSON: `{ "type": "alert", "text": "New Follower: Innoruuk" }`
+
+Twitch alerts add `kind` (`follow`/`sub`/`cheer`/`raid`), `user` and `amount`. The overlay looks
+`kind` up in the config to pick a headline and accent colour; manual alerts have no `kind` and use
+the `generic` entry.
+
+## Settings
+
+Alert duration and per-kind labels/colours live in `backend/config.json`, editable from `/control`.
+Saving does two things: writes the file, and broadcasts the new config over `/ws` — so changes land
+in OBS immediately without refreshing the browser source.
+
+The file is gitignored and entirely optional. Defaults live in the Pydantic models in `main.py`, so
+a fresh clone runs with no config file and only writes one the first time you hit Save. A malformed
+file logs a warning and falls back to defaults rather than stopping the server.
 
 **Error codes worth knowing:** `503` means the backend can't reach OBS (not running, or WebSocket server
 off). `502` means OBS is connected but rejected the request — usually a misspelled scene or source name.
@@ -127,9 +143,11 @@ off). `502` means OBS is connected but rejected the request — usually a misspe
 
 ```
 backend/
-  main.py            # the entire backend: relay, OBS controller, routes
+  main.py            # the entire backend: relay, OBS controller, routes, settings
+  twitch.py          # EventSub client (Phase 7)
   requirements.txt   # pinned deps
   .env.example       # config template
+  config.json        # widget settings, written by /control (gitignored)
 frontend/
   src/
     views/
@@ -151,6 +169,27 @@ From `frontend/`:
 
 There are no tests or linters configured yet in either half.
 
+### Production mode (one process)
+
+Development needs two servers, but for actually streaming you can collapse to one:
+
+```sh
+cd frontend && npm run build      # writes frontend/dist/
+cd ../backend && source venv/bin/activate && fastapi run main.py
+```
+
+FastAPI serves `frontend/dist/` at `/`, so point OBS at `http://localhost:8000/overlay/alert` and
+stop running Vite. The mount is registered last and skipped entirely when `dist/` is absent, so this
+changes nothing about the dev workflow — if you haven't built, the backend just logs a note and
+serves the API alone.
+
+Because `/control` and `/overlay/alert` are client-side routes with no file on disk, unmatched paths
+fall back to `index.html` and let vue-router take over. Paths under `/api` are excluded from that
+fallback so a wrong endpoint still returns a JSON 404 instead of a page.
+
+Remember to rebuild after frontend changes — in this mode the backend serves whatever was in `dist/`
+at request time, not your working tree.
+
 **Gotchas**
 
 - Every `.vue` file with a script block must use `<script setup lang="ts">`. Plain `<script setup>`
@@ -169,4 +208,4 @@ Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roa
 - [x] **Phase 5** — overlay running live in OBS
 - [x] **Phase 6** — OBS control from Python
 - [x] **Phase 7** — Twitch EventSub (follows/subs fire alerts automatically)
-- [ ] **Phase 8** — persistence and a single-process production build
+- [x] **Phase 8** — persistence and a single-process production build

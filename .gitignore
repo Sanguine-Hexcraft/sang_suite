@@ -51,3 +51,6 @@ __pycache__/
 .env
 # Cached Twitch user + refresh token — as sensitive as a password.
 .twitch_tokens.json
+# Widget settings saved from /control. Machine-local state, not secret; the
+# defaults live in the Pydantic models, so a fresh clone needs no file.
+config.json
