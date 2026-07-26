@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, toRaw } from 'vue'
 import { useOverlayStore, type AppConfig } from '@/stores/overlay'
-import { playLevelUp } from '@/audio/levelUp'
+import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
 // status: a reactive container, starting as '...'.
 // "Reactive" = when its value changes, Vue re-renders anything
@@ -90,13 +90,17 @@ async function callObs(path: string, body: object) {
         Sound volume:
         <input v-model.number="draft.alerts.volume" type="range" min="0" max="1" step="0.05" />
         {{ Math.round(draft.alerts.volume * 100) }}%
-        <!-- Previews the draft value, so you can dial it in before saving. -->
-        <button @click="playLevelUp(draft.alerts.volume)">Test Sound</button>
       </p>
+      <!-- Every control here previews against the draft, so you can dial a kind
+           in by ear before saving anything to the overlay. -->
       <p v-for="(kind, name) in draft.alerts.kinds" :key="name">
         <strong>{{ name }}</strong>
         <input v-model="kind.label" />
         <input v-model="kind.accent" type="color" />
+        <select v-model="kind.sound">
+          <option v-for="sound in SOUND_NAMES" :key="sound" :value="sound">{{ sound }}</option>
+        </select>
+        <button @click="playSound(kind.sound, draft.alerts.volume)">▶</button>
       </p>
       <button @click="saveConfig">Save Settings</button>
       <p>Config: {{ configStatus }}</p>

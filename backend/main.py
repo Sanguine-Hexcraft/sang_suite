@@ -50,15 +50,21 @@ class AlertKindConfig(BaseModel):
     # rgb(var(--accent) / alpha), and a plain hex is what an <input
     # type="color"> on the control panel produces.
     accent: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    # Names a jingle in the overlay's SOUNDS table (frontend/src/audio/
+    # sounds.ts), which owns the list; deliberately not an enum here so adding a
+    # tune there doesn't need a matching backend change. An unknown name falls
+    # back to the default jingle rather than erroring. Defaulted so a
+    # config.json written before this field still validates.
+    sound: str = "levelup"
 
 
 DEFAULT_KINDS = {
-    "follow": AlertKindConfig(label="NEW FOLLOWER", accent="#b06bff"),
-    "sub": AlertKindConfig(label="NEW SUBSCRIBER", accent="#ffd166"),
-    "cheer": AlertKindConfig(label="BITS INCOMING", accent="#4dd6ff"),
-    "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00"),
+    "follow": AlertKindConfig(label="NEW FOLLOWER", accent="#b06bff", sound="follow"),
+    "sub": AlertKindConfig(label="NEW SUBSCRIBER", accent="#ffd166", sound="sub"),
+    "cheer": AlertKindConfig(label="BITS INCOMING", accent="#4dd6ff", sound="cheer"),
+    "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00", sound="raid"),
     # Manual alerts from /control arrive with no `kind` and land here.
-    "generic": AlertKindConfig(label="ALERT", accent="#ff2d55"),
+    "generic": AlertKindConfig(label="ALERT", accent="#ff2d55", sound="levelup"),
 }
 
 

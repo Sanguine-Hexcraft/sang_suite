@@ -18,6 +18,7 @@ export interface OverlayEvent {
 export interface AlertKindConfig {
   label: string
   accent: string // "#rrggbb"
+  sound: string // a key of SOUNDS in @/audio/sounds
 }
 
 export interface AppConfig {
