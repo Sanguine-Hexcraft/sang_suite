@@ -122,9 +122,13 @@ async function callObs(path: string, body: object) {
 
 main {
   color: white;
-  background-color: purple;
+  background-color: #282a36;
   min-height: 100vh;
   padding: 20px
+}
+
+main h2 {
+  margin-top: 100px;
 }
 
 </style>
