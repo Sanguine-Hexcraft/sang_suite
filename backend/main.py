@@ -65,6 +65,10 @@ DEFAULT_KINDS = {
 class AlertConfig(BaseModel):
     # Bounded so a typo in config.json can't wedge an alert on screen forever.
     duration_ms: int = Field(default=8000, ge=500, le=60_000)
+    # Peak gain of the level-up jingle, 0 = muted. The default is tuned for the
+    # triangle wave the overlay synthesises; a squarer waveform reads louder at
+    # the same gain, so retune this if you change the oscillator.
+    volume: float = Field(default=0.45, ge=0.0, le=1.0)
     kinds: dict[str, AlertKindConfig] = DEFAULT_KINDS
 
 

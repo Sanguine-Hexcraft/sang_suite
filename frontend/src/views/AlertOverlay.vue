@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useOverlayStore, type AlertKindConfig } from '@/stores/overlay'
+import { playLevelUp, primeAudio } from '@/audio/levelUp'
 
 const store = useOverlayStore()
 const alertShowing = ref(false)
@@ -12,6 +13,7 @@ let hideTimer: ReturnType<typeof setTimeout> | undefined
 // an alert firing in that window should still be legible rather than unstyled.
 const FALLBACK: AlertKindConfig = { label: 'ALERT', accent: '#ff2d55' }
 const FALLBACK_DURATION_MS = 8000
+const FALLBACK_VOLUME = 0.45
 
 // Manual alerts from the control panel arrive with no `kind`, so they fall
 // through to the 'generic' entry.
@@ -32,6 +34,7 @@ watch(() => store.lastEvent, (event) => {
   alertText.value = event.text ?? ''
   alertKind.value = event.kind ?? ''
   alertShowing.value = true
+  playLevelUp(store.config?.alerts.volume ?? FALLBACK_VOLUME)
   // Cancel any in-flight hide so a new alert gets its full duration
   // instead of being cut short by the previous alert's timer.
   clearTimeout(hideTimer)
@@ -43,6 +46,7 @@ watch(() => store.lastEvent, (event) => {
 onMounted(() => {
   store.connect()
   store.loadConfig()
+  primeAudio()
 })
 </script>
 

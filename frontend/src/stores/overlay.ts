@@ -23,6 +23,7 @@ export interface AlertKindConfig {
 export interface AppConfig {
   alerts: {
     duration_ms: number
+    volume: number // 0–1, peak gain of the alert jingle
     kinds: Record<string, AlertKindConfig>
   }
 }
