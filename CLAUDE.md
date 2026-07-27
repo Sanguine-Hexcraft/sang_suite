@@ -8,6 +8,8 @@ A streaming tools suite: a FastAPI backend plus a Vue 3 frontend that serves bot
 
 ## Running the app
 
+### For development
+
 Both servers must run simultaneously; the browser only talks to Vite, which proxies `/api` and `/ws` to the backend on port 8000 (see `frontend/vite.config.ts`).
 
 Backend (FastAPI on :8000):
@@ -25,6 +27,19 @@ Other frontend commands (run from `frontend/`):
 - `npm run build` — type-check + production build
 
 There are no tests or linter configured yet, in either half.
+
+### For streaming
+
+Vite is a development tool only — on stream the backend serves the built frontend itself, so it's one process and no :5173:
+
+```sh
+./stream.sh              # npm run build, then `fastapi run` on :8000
+./stream.sh --skip-build # skip the rebuild when the frontend hasn't changed
+```
+
+OBS browser sources therefore point at `http://localhost:8000/overlay/alert`, *not* the Vite port. The two modes can't run at once — both want :8000.
+
+`stream.sh` rebuilds by default because a stale `frontend/dist` fails silently: the mount happily serves an old build, so the overlay looks like the code changes never landed.
 
 ## Architecture notes
 
