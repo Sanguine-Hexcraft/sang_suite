@@ -120,7 +120,14 @@ async function callObs(path: string, body: object) {
 
 <style scoped>
 
+@font-face {
+  font-family: 'Departure Mono';
+  src: local('Departure Mono'), url('/fonts/DepartureMono-Regular.otf') format('opentype');
+  font-display: block;
+}
+
 main {
+  font-family: 'Departure Mono', ui-monospace, monospace;
   color: white;
   background-color: #282a36;
   min-height: 100vh;
