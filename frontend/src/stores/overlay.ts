@@ -29,11 +29,25 @@ export interface AppConfig {
   }
 }
 
+// An event plus the bookkeeping the activity feed needs: `at` for the
+// timestamp column, `id` because two identical alerts would otherwise be
+// indistinguishable to v-for's :key.
+export interface LoggedEvent extends OverlayEvent {
+  at: number
+  id: number
+}
+
+// Long enough to scroll back through a raid, short enough that a stream-length
+// session doesn't grow the array forever.
+const MAX_LOG = 50
+
 export const useOverlayStore = defineStore('overlay', () => {
   const connected = ref(false)
   const lastEvent = ref<OverlayEvent | null>(null)
+  const recentEvents = ref<LoggedEvent[]>([])
   const config = ref<AppConfig | null>(null)
   let socket: WebSocket | null = null
+  let eventSeq = 0
 
   async function loadConfig() {
     const res = await fetch('/api/config')
@@ -57,8 +71,16 @@ export const useOverlayStore = defineStore('overlay', () => {
       const message = JSON.parse(e.data)
       // Config pushes ride the same relay as alerts; keep them out of
       // lastEvent so a settings save doesn't look like an overlay event.
-      if (message.type === 'config') config.value = message.config
-      else lastEvent.value = message
+      if (message.type === 'config') {
+        config.value = message.config
+        return
+      }
+      lastEvent.value = message
+      // Newest first, so the feed reads top-down without reversing in the
+      // template. The relay echoes to every client including the sender, so
+      // this logs manual and Twitch alerts alike.
+      recentEvents.value.unshift({ ...message, at: Date.now(), id: ++eventSeq })
+      if (recentEvents.value.length > MAX_LOG) recentEvents.value.pop()
     }
   }
 
@@ -66,5 +88,5 @@ export const useOverlayStore = defineStore('overlay', () => {
     socket?.send(JSON.stringify(event))
   }
 
-  return { connected, lastEvent, config, connect, loadConfig, send }
+  return { connected, lastEvent, recentEvents, config, connect, loadConfig, send }
 })
