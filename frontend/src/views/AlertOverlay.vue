@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { useOverlayStore, type AlertKindConfig } from '@/stores/overlay'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useOverlayStore, type AlertKindConfig, type OverlayEvent } from '@/stores/overlay'
 import { playSound, primeAudio } from '@/audio/sounds'
 
 const store = useOverlayStore()
 const alertShowing = ref(false)
 const alertText = ref('')
 const alertKind = ref('')
-let hideTimer: ReturnType<typeof setTimeout> | undefined
 
 // Used only in the gap before /api/config answers, or if it fails outright —
 // an alert firing in that window should still be legible rather than unstyled.
@@ -29,25 +28,63 @@ const accent = computed(() => {
   return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`
 })
 
+// --- alert queue ------------------------------------------------------------
+// Alerts arrive whenever Twitch feels like it — two follows a second apart are
+// normal, and a raid can land dozens at once. Showing them as they arrive means
+// each one overwrites the last mid-display, so nobody's alert is actually seen.
+// Instead they wait in line and are shown one at a time, each for its full
+// duration. Plain arrays and locals, not refs: the template never reads them.
+const queue: OverlayEvent[] = []
+let draining = false
+
+// The leave animation is 260ms (.pop-leave-active); the rest is a beat of
+// breathing room so two alerts don't read as one long one.
+const GAP_MS = 450
+// A 40-person raid shouldn't book six minutes of screen time. Overflow is
+// dropped from the *display* only — it's still logged in the activity feed.
+const MAX_QUEUE = 12
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 watch(() => store.lastEvent, (event) => {
   if (event?.type !== 'alert') return
-  alertText.value = event.text ?? ''
-  alertKind.value = event.kind ?? ''
-  alertShowing.value = true
-  // Reads through the computed, so it picks up the kind assigned just above.
-  playSound(kindConfig.value.sound, store.config?.alerts.volume ?? FALLBACK_VOLUME)
-  // Cancel any in-flight hide so a new alert gets its full duration
-  // instead of being cut short by the previous alert's timer.
-  clearTimeout(hideTimer)
-  hideTimer = setTimeout(() => {
-    alertShowing.value = false
-  }, store.config?.alerts.duration_ms ?? FALLBACK_DURATION_MS)
+  if (queue.length >= MAX_QUEUE) return
+  queue.push(event)
+  // One loop drains the whole queue, so only start it if it isn't running.
+  if (!draining) void drain()
 })
+
+async function drain() {
+  draining = true
+  while (queue.length) {
+    const event = queue.shift()!
+    alertText.value = event.text ?? ''
+    alertKind.value = event.kind ?? ''
+    alertShowing.value = true
+    // Fired here rather than on arrival: a raid would otherwise stack every
+    // jingle into one second while the first alert is still on screen. Reads
+    // through the computed, so it picks up the kind assigned just above.
+    playSound(kindConfig.value.sound, store.config?.alerts.volume ?? FALLBACK_VOLUME)
+    // Read inside the loop, so changing the duration in /control applies to
+    // alerts still waiting rather than only to the next batch.
+    await wait(store.config?.alerts.duration_ms ?? FALLBACK_DURATION_MS)
+    alertShowing.value = false
+    await wait(GAP_MS)
+  }
+  draining = false
+}
 
 onMounted(() => {
   store.connect()
   store.loadConfig()
   primeAudio()
+})
+
+// The loop would otherwise keep running after the view is gone, writing to refs
+// nothing renders. OBS's browser source never unmounts, but navigating away
+// from /overlay/alert in a normal tab does.
+onUnmounted(() => {
+  queue.length = 0
 })
 </script>
 
