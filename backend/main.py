@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -160,6 +161,59 @@ class OBSController:
 
 obs = OBSController(OBS_WS_URL, OBS_WS_PASSWORD)
 
+# The port stream.sh serves on, which is also what the OBS browser sources
+# point at (http://localhost:8000/overlay/alert).
+OVERLAY_PORT = 8000
+
+
+async def refresh_overlay_sources() -> None:
+    """Reload every OBS browser source pointing at this backend.
+
+    If OBS was already open when this process started, its overlay sources hit
+    a dead port and are stuck on the browser's error page — no JS ran, so the
+    reconnect loop in the frontend store can't rescue them. This presses the
+    same "Refresh cache of current page" button you'd otherwise press by hand.
+    Browser sources aimed anywhere else are left alone.
+    """
+    inputs = await obs.call(
+        simpleobsws.Request("GetInputList", {"inputKind": "browser_source"})
+    )
+    for source in inputs.responseData["inputs"]:
+        name = source["inputName"]
+        settings = await obs.call(
+            simpleobsws.Request("GetInputSettings", {"inputName": name})
+        )
+        url = settings.responseData["inputSettings"].get("url", "")
+        if f"localhost:{OVERLAY_PORT}" not in url:
+            continue
+        await obs.call(
+            simpleobsws.Request(
+                "PressInputPropertiesButton",
+                {"inputName": name, "propertyName": "refreshnocache"},
+            )
+        )
+
+
+async def _refresh_once_serving() -> None:
+    """Wait until we're actually accepting connections, then refresh OBS.
+
+    Uvicorn runs lifespan startup *before* it binds the listening socket, so
+    refreshing straight from lifespan would only reload OBS into another
+    connection refused. Poll our own port first — up to ~10s, after which
+    something else is wrong and a refresh wouldn't have helped anyway.
+    """
+    for _ in range(50):
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", OVERLAY_PORT)
+            writer.close()
+            break
+        except OSError:
+            await asyncio.sleep(0.2)
+    try:
+        await refresh_overlay_sources()
+    except (ConnectionError, OSError, HTTPException) as exc:
+        print(f"[obs] Couldn't refresh overlay sources: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -167,6 +221,10 @@ async def lifespan(app: FastAPI):
     # the connection is lazy, so a button press later will retry.
     try:
         await obs._ready_client()
+        # Kick any stale overlay sources once we're serving. Parked on app.state
+        # so the task keeps a strong reference; a bare create_task can be
+        # garbage-collected mid-flight.
+        app.state.refresh_task = asyncio.create_task(_refresh_once_serving())
     except (ConnectionError, OSError):
         pass
     # Twitch is optional in the same way: missing credentials or an auth
@@ -177,6 +235,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"[twitch] Startup failed, alerts disabled: {exc}")
     yield
+    # Cancel the refresh if we're shutting down before it finished, so it can't
+    # run against an OBS connection we're about to close.
+    task = getattr(app.state, "refresh_task", None)
+    if task is not None:
+        task.cancel()
     await twitch_alerts.stop()
     await obs.disconnect()
 
