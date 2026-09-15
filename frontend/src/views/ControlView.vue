@@ -109,6 +109,23 @@ async function callObs(path: string, body: object) {
   }
 }
 
+// --- panic ----------------------------------------------------------------
+// Clears every queue and hides everything on both overlays. Exists because
+// when a clip is blaring at the wrong moment you do not want to be alt-tabbing
+// to a terminal.
+const panicStatus = ref('')
+
+async function panic() {
+  panicStatus.value = 'stopping…'
+  try {
+    const res = await fetch('/api/panic', { method: 'POST' })
+    panicStatus.value = res.ok ? 'overlays cleared' : `error: ${res.status}`
+  } catch (e) {
+    panicStatus.value = `network error: ${e}`
+  }
+  setTimeout(() => (panicStatus.value = ''), 4000)
+}
+
 // --- activity feed ------------------------------------------------------
 function clockTime(at: number) {
   return new Date(at).toLocaleTimeString([], { hour12: false })
@@ -139,6 +156,15 @@ function accentFor(kind?: string) {
     </header>
 
     <div class="grid">
+      <section class="card panic-card">
+        <h2>Panic</h2>
+        <p class="hint">Clears every queue and hides both overlays immediately.</p>
+        <div class="row">
+          <button class="panic" @click="panic">STOP EVERYTHING</button>
+          <span v-if="panicStatus" class="status">{{ panicStatus }}</span>
+        </div>
+      </section>
+
       <section class="card">
         <h2>Test Alerts</h2>
         <label class="field">
@@ -419,6 +445,29 @@ button.primary {
 
 button.icon {
   padding: 7px 10px;
+}
+
+/* Deliberately the loudest thing on the page — it gets used in a hurry. */
+button.panic {
+  background: #c32222;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 12px 18px;
+}
+
+button.panic:hover {
+  background: #e02b2b;
+}
+
+.panic-card {
+  border-color: #c32222;
+}
+
+.hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--dim);
 }
 
 .status {

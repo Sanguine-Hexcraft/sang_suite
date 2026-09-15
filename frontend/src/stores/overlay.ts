@@ -16,6 +16,17 @@ export interface OverlayEvent {
   amount?: number | null
 }
 
+// A clip or gif to play on /overlay/media (Phase 11). Its own message type on
+// the shared relay, so the alert overlay ignores it and one redeem can
+// legitimately fire both an alert and a clip.
+export interface MediaEvent extends OverlayEvent {
+  type: 'media'
+  src: string // "/media/videos/bait.webm"
+  title: string
+  user: string
+  interrupt: boolean // cut in, or wait its turn
+}
+
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
 // over HTTP on load, then kept fresh by `type: 'config'` relay messages.
 export interface AlertKindConfig {

@@ -21,6 +21,9 @@ export default defineConfig({
     proxy: {
       '/api': 'http://localhost:8000',
       '/ws': { target: 'ws://localhost:8000', ws: true },
+      // Clips live in backend/media/, not frontend/public/, so dev has to
+      // proxy them the same way it proxies the API.
+      '/media': 'http://localhost:8000',
     }
   }
 })

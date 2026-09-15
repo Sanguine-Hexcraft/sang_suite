@@ -245,14 +245,33 @@ class TwitchAlerts:
             )
             return
 
-        if "alert" not in routing.actions:
-            return
-
         # A reward's own title is almost always what you want on screen, so
         # `label` only has to be set when you want to override it.
         title = routing.label or reward.title
-        text = f"{e.user_name} redeemed {title}!"
-        # user_input is "" for rewards that don't prompt for text.
-        if e.user_input:
-            text = f"{text} ({e.user_input})"
-        await self._broadcast(_alert("redeem", e.user_name, text, reward.cost))
+
+        if "alert" in routing.actions:
+            text = f"{e.user_name} redeemed {title}!"
+            # user_input is "" for rewards that don't prompt for text.
+            if e.user_input:
+                text = f"{text} ({e.user_input})"
+            await self._broadcast(_alert("redeem", e.user_name, text, reward.cost))
+
+        if "media" in routing.actions:
+            if not routing.media:
+                print(
+                    f"[redeem] {reward.title!r} is routed to media but has no "
+                    f"`media` path in config.json -- nothing to play."
+                )
+                return
+            # Its own message type, on the same relay, read by /overlay/media.
+            # The alert overlay ignores it and vice versa, so one redeem can
+            # legitimately do both.
+            await self._broadcast(
+                {
+                    "type": "media",
+                    "src": f"/media/{routing.media.lstrip('/')}",
+                    "title": title,
+                    "user": e.user_name,
+                    "interrupt": routing.interrupt,
+                }
+            )

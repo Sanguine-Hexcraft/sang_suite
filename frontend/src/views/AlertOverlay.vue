@@ -47,6 +47,13 @@ const MAX_QUEUE = 12
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 watch(() => store.lastEvent, (event) => {
+  // Panic clears the backlog and blanks the overlay. The drain loop is still
+  // awaiting its timer, but with an empty queue it exits on the next pass.
+  if (event?.type === 'panic') {
+    queue.length = 0
+    alertShowing.value = false
+    return
+  }
   if (event?.type !== 'alert') return
   if (queue.length >= MAX_QUEUE) return
   queue.push(event)

@@ -97,9 +97,16 @@ class RewardConfig(BaseModel):
     # Shown on the overlay. None = use the reward's own title from Twitch, so
     # the common case needs no text duplicated into config.
     label: str | None = None
-    # Phase 10 only knows "alert"; "media" and "chat" arrive in 11 and 12.
-    # A plain list so a reward can do several things at once later.
+    # "alert" and "media" are understood; "chat" arrives in Phase 12. A plain
+    # list so one reward can do several things at once.
     actions: list[str] = ["alert"]
+    # Path under backend/media/, e.g. "videos/bait.webm". Served at /media/...
+    # Required when actions includes "media"; ignored otherwise.
+    media: str | None = None
+    # Whether this clip cuts in or waits its turn. A five-second airhorn should
+    # probably interrupt; a thirty-second bit should queue. The column people
+    # forget when they list their redeems.
+    interrupt: bool = False
 
 
 class Config(BaseModel):
@@ -327,9 +334,11 @@ class ConnectionManager:
         every connection after it in the list -- which used to leave the
         overlay silent until the backend was restarted.
         """
-        # Config pushes are idempotent state, not events: the overlay fetches
-        # /api/config on mount anyway, so replaying them would be noise.
-        if message.get("type") != "config":
+        # Two kinds of message stay out of the replay buffer. Config pushes are
+        # idempotent state, not events -- the overlay fetches /api/config on
+        # mount anyway. Panic is a moment-in-time command: replaying a stale
+        # one would blank a freshly reconnected overlay for no reason.
+        if message.get("type") not in ("config", "panic"):
             self._seq += 1
             message = {**message, "id": self._seq}
             self._history.append(message)
@@ -368,6 +377,19 @@ twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/panic")
+async def panic():
+    """Clear every queue and hide everything, on both overlays.
+
+    When a clip is blaring at the wrong moment you do not want to be
+    alt-tabbing to a terminal. Deliberately not in the replay history: a
+    reconnecting overlay replaying a stale panic would blank itself for no
+    reason.
+    """
+    await manager.broadcast({"type": "panic"})
+    return {"ok": True}
 
 
 # --- widget settings endpoints (Phase 8) ------------------------------------
@@ -456,6 +478,19 @@ async def websocket_endpoint(ws: WebSocket):
             await manager.broadcast(data)
     except WebSocketDisconnect:
         manager.disconnect(ws)
+
+
+# --- clip / gif assets for the media overlay (Phase 11) ---------------------
+# Gitignored and served straight off disk rather than living in
+# frontend/public/, so adding a clip is a file copy instead of a rebuild.
+# Registered ABOVE the SPA mount: a mount at "/" shadows everything declared
+# after it, so this has to come first or /media/... would return index.html.
+MEDIA = Path(__file__).parent / "media"
+
+if MEDIA.is_dir():
+    app.mount("/media", StaticFiles(directory=MEDIA), name="media")
+else:
+    print(f"[media] No clip directory at {MEDIA} — media redeems will 404.")
 
 
 # --- serve the built frontend (Phase 8) -------------------------------------

@@ -55,3 +55,8 @@ __pycache__/
 # Widget settings saved from /control. Machine-local state, not secret; the
 # defaults live in the Pydantic models, so a fresh clone needs no file.
 config.json
+
+# Clip/gif assets for the media overlay (Phase 11). Big binaries, and they
+# change independently of the code — drop a file in and reference it in
+# config.json rather than committing it.
+backend/media/
