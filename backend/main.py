@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from collections import deque
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -251,13 +252,42 @@ app = FastAPI(lifespan=lifespan)
 
 
 # --- browser <-> backend relay (Phase 4) ------------------------------------
+# How many past events a reconnecting overlay can ask for. A raid is the
+# worst case and tops out well under this; beyond it the client is better off
+# missing the backlog than dumping a minute of stale alerts on screen.
+HISTORY_LIMIT = 50
+
+
 class ConnectionManager:
     def __init__(self):
         self.connections: list[WebSocket] = []
+        # Every broadcast gets a monotonic id so a client that reconnects can
+        # say what it last saw and be sent only the gap. Starts at 0, so the
+        # first real event is id 1 and "I have seen nothing" is a falsy 0.
+        self._seq = 0
+        self._history: deque[dict] = deque(maxlen=HISTORY_LIMIT)
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.connections.append(ws)
+
+    async def replay(self, ws: WebSocket, last_id: int) -> int:
+        """Send one client everything it missed after `last_id`.
+
+        Returns how many were replayed. A client that has never seen an event
+        passes 0 and gets nothing: a browser source opening fresh mid-stream
+        should start clean, not inherit an hour of backlog.
+        """
+        if last_id <= 0:
+            return 0
+        missed = [m for m in self._history if m["id"] > last_id]
+        for message in missed:
+            try:
+                await ws.send_text(json.dumps(message))
+            except (WebSocketDisconnect, RuntimeError):
+                # Died mid-replay; broadcast() will evict it on the next event.
+                return 0
+        return len(missed)
 
     def disconnect(self, ws: WebSocket):
         # Tolerant of a socket that has already been dropped: broadcast() now
@@ -276,6 +306,12 @@ class ConnectionManager:
         every connection after it in the list -- which used to leave the
         overlay silent until the backend was restarted.
         """
+        # Config pushes are idempotent state, not events: the overlay fetches
+        # /api/config on mount anyway, so replaying them would be noise.
+        if message.get("type") != "config":
+            self._seq += 1
+            message = {**message, "id": self._seq}
+            self._history.append(message)
         payload = json.dumps(message)
         dead: list[WebSocket] = []
         for ws in self.connections:
@@ -376,7 +412,16 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             data = json.loads(await ws.receive_text())
-            # For now: relay everything to everyone
+            # A reconnecting client announces the last id it saw so it can be
+            # sent the gap. Handled here and NOT relayed -- the loop below
+            # echoes everything to everyone, and a stray hello would reach the
+            # overlays as a mystery event.
+            if data.get("type") == "hello":
+                replayed = await manager.replay(ws, int(data.get("last_id") or 0))
+                if replayed:
+                    print(f"[ws] replayed {replayed} missed event(s) to a client")
+                continue
+            # For now: relay everything else to everyone
             await manager.broadcast(data)
     except WebSocketDisconnect:
         manager.disconnect(ws)

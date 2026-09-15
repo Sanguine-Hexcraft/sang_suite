@@ -4,6 +4,9 @@ import { ref } from 'vue'
 export interface OverlayEvent {
   type: string
   text?: string
+  // Phase 9: a monotonic id stamped by the server on every broadcast. Used to
+  // ask for the gap after a reconnect; config pushes deliberately carry none.
+  id?: number
   // Added in Phase 7. The overlay only needs type/text to render, but Twitch
   // alerts also carry these so views can style per-event later without a change
   // to the backend. kind = follow | sub | cheer | raid; amount = bits / raid
@@ -41,6 +44,14 @@ export interface LoggedEvent extends OverlayEvent {
 // session doesn't grow the array forever.
 const MAX_LOG = 50
 
+// Module scope, NOT localStorage, and deliberately not inside the store.
+// The case worth rescuing is the reconnect loop -- onclose -> setTimeout ->
+// connect() inside a page that never unloaded, which is what a backend restart
+// or a network blip looks like. This survives that, so the replay fires.
+// A full page reload wipes it, last_id is 0, and nothing replays: an OBS
+// browser source starting fresh mid-stream should not dump backlog on canvas.
+let lastSeenId = 0
+
 export const useOverlayStore = defineStore('overlay', () => {
   const connected = ref(false)
   const lastEvent = ref<OverlayEvent | null>(null)
@@ -59,7 +70,12 @@ export const useOverlayStore = defineStore('overlay', () => {
     if (socket && socket.readyState !== WebSocket.CLOSED) return
 
     socket = new WebSocket(`ws://${location.host}/ws`)
-    socket.onopen = () => (connected.value = true)
+    socket.onopen = () => {
+      connected.value = true
+      // Ask for anything broadcast while we were away. 0 on a fresh page load
+      // means "send nothing".
+      socket?.send(JSON.stringify({ type: 'hello', last_id: lastSeenId }))
+    }
     socket.onclose = () => {
       connected.value = false
       setTimeout(connect, 2000) // auto-reconnect
@@ -74,6 +90,11 @@ export const useOverlayStore = defineStore('overlay', () => {
       if (message.type === 'config') {
         config.value = message.config
         return
+      }
+      // Track before dispatch so a replayed batch advances the watermark even
+      // if a later handler throws.
+      if (typeof message.id === 'number' && message.id > lastSeenId) {
+        lastSeenId = message.id
       }
       lastEvent.value = message
       // Newest first, so the feed reads top-down without reversing in the
