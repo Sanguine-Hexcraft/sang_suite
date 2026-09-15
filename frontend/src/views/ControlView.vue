@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, toRaw } from 'vue'
+import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
 import { useOverlayStore, type AppConfig } from '@/stores/overlay'
 import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
@@ -32,6 +32,9 @@ onMounted(async () => {
   store.connect() // open (or reuse) the WebSocket
   checkHealth()
   healthTimer = setInterval(checkHealth, 10_000)
+  // Fire and forget: OBS may not be running, and that must not hold up the
+  // rest of the dashboard loading.
+  void loadScenes()
   await store.loadConfig()
   draft.value = structuredClone(toRaw(store.config))
 })
@@ -84,11 +87,81 @@ function revertConfig() {
 }
 
 // --- OBS control (Phase 6) ----------------------------------------------
-// Editable so you can point them at whatever your OBS actually has.
-const obsScene = ref('Scene')
-const obsSource = ref('MySource')
+const obsScene = ref('')
+const obsSource = ref('')
 const obsStatus = ref('') // last result/error, shown under the buttons
 const obsOk = ref<boolean | null>(null)
+
+// Populated from OBS itself, so you pick from what exists rather than typing
+// a name and only finding out it was wrong when OBS rejects it.
+interface ObsSource {
+  name: string
+  visible: boolean
+}
+const obsScenes = ref<string[]>([])
+const obsSources = ref<ObsSource[]>([])
+const obsLoading = ref(false)
+// OBS being closed is normal and not an error worth shouting about — the
+// dropdowns just stay empty until you press Reload.
+const obsReachable = ref<boolean | null>(null)
+
+async function loadScenes() {
+  obsLoading.value = true
+  try {
+    const res = await fetch('/api/obs/scenes')
+    if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText)
+    const data = await res.json()
+    obsScenes.value = data.scenes
+    obsReachable.value = true
+    // Default to whatever is live, so the panel opens on the current scene.
+    if (!obsScene.value || !data.scenes.includes(obsScene.value)) {
+      obsScene.value = data.current ?? data.scenes[0] ?? ''
+    }
+    await loadSources()
+  } catch (e) {
+    obsReachable.value = false
+    obsScenes.value = []
+    obsSources.value = []
+    obsStatus.value = `${e}`
+  } finally {
+    obsLoading.value = false
+  }
+}
+
+async function loadSources() {
+  if (!obsScene.value) {
+    obsSources.value = []
+    return
+  }
+  try {
+    const res = await fetch(`/api/obs/sources?scene=${encodeURIComponent(obsScene.value)}`)
+    if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText)
+    obsSources.value = (await res.json()).sources
+    // The previously selected source may not exist in the newly picked scene.
+    if (!obsSources.value.some((s) => s.name === obsSource.value)) {
+      obsSource.value = obsSources.value[0]?.name ?? ''
+    }
+  } catch (e) {
+    obsSources.value = []
+    obsStatus.value = `${e}`
+  }
+}
+
+// Sources are per scene in OBS -- the same source carries a different
+// visibility in each -- so the list reloads whenever the scene changes.
+watch(obsScene, loadSources)
+
+// Toggling visibility makes the dots in the dropdown stale, so re-read the
+// scene afterwards rather than optimistically flipping our own copy: if OBS
+// refused the change, the list should show what OBS actually did.
+async function setSourceVisible(visible: boolean) {
+  await callObs('/api/obs/source', {
+    scene: obsScene.value,
+    source: obsSource.value,
+    visible,
+  })
+  await loadSources()
+}
 
 // POST a JSON body to one of our /api/obs endpoints and report how it went.
 async function callObs(path: string, body: object) {
@@ -182,29 +255,43 @@ function accentFor(kind?: string) {
       </section>
 
       <section class="card">
-        <h2>OBS Control</h2>
+        <h2>
+          OBS Control
+          <span class="status inline">
+            {{ obsLoading ? 'loading…' : obsReachable === false ? 'OBS not reachable' : '' }}
+          </span>
+        </h2>
         <label class="field">
           <span>Scene</span>
-          <input v-model="obsScene" />
+          <select v-model="obsScene" :disabled="!obsScenes.length">
+            <option v-if="!obsScenes.length" value="">— no scenes —</option>
+            <option v-for="name in obsScenes" :key="name" :value="name">{{ name }}</option>
+          </select>
         </label>
         <label class="field">
           <span>Source</span>
-          <input v-model="obsSource" />
+          <select v-model="obsSource" :disabled="!obsSources.length">
+            <option v-if="!obsSources.length" value="">— no sources —</option>
+            <!-- The dot marks what OBS currently has visible, so Show/Hide
+                 isn't a guess. It's a snapshot from the last load, not live. -->
+            <option v-for="s in obsSources" :key="s.name" :value="s.name">
+              {{ s.visible ? '●' : '○' }} {{ s.name }}
+            </option>
+          </select>
         </label>
         <div class="row">
-          <button class="primary" @click="callObs('/api/obs/scene', { scene: obsScene })">
+          <button
+            class="primary"
+            :disabled="!obsScene"
+            @click="callObs('/api/obs/scene', { scene: obsScene })"
+          >
             Switch Scene
           </button>
-          <button
-            @click="callObs('/api/obs/source', { scene: obsScene, source: obsSource, visible: true })"
-          >
-            Show
-          </button>
-          <button
-            @click="callObs('/api/obs/source', { scene: obsScene, source: obsSource, visible: false })"
-          >
-            Hide
-          </button>
+          <button :disabled="!obsSource" @click="setSourceVisible(true)">Show</button>
+          <button :disabled="!obsSource" @click="setSourceVisible(false)">Hide</button>
+          <!-- Scenes and sources change in OBS while this page is open, and
+               nothing pushes that to us, so there has to be a manual reload. -->
+          <button class="icon" title="Reload from OBS" @click="loadScenes">⟳</button>
         </div>
         <p class="status">{{ obsStatus || '—' }}</p>
       </section>
@@ -468,6 +555,18 @@ button.panic:hover {
   margin: 0 0 10px;
   font-size: 12px;
   color: var(--dim);
+}
+
+/* OBS closed, or a scene with no sources — don't offer a button that can
+   only fail. */
+button:disabled,
+select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button:disabled:hover {
+  background: var(--bg);
 }
 
 .status {

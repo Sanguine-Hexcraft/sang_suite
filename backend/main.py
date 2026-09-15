@@ -423,6 +423,41 @@ class SourceRequest(BaseModel):
     visible: bool
 
 
+@app.get("/api/obs/scenes")
+async def list_scenes():
+    """Every scene in OBS, plus which one is live.
+
+    Feeds the dashboard's scene dropdown so you pick from what actually exists
+    instead of typing a name and finding out it was wrong only when OBS
+    rejects it.
+    """
+    resp = await obs.call(simpleobsws.Request("GetSceneList"))
+    data = resp.responseData
+    # OBS returns scenes in its own reverse display order; flip so the list
+    # reads the same way it does in the OBS scene panel.
+    scenes = [s["sceneName"] for s in reversed(data["scenes"])]
+    return {"scenes": scenes, "current": data.get("currentProgramSceneName")}
+
+
+@app.get("/api/obs/sources")
+async def list_sources(scene: str):
+    """Every source in one scene, with its current visibility.
+
+    Scoped to a scene because that's how OBS models it: the same source can
+    appear in several scenes with a different sceneItemId and a different
+    enabled state in each.
+    """
+    resp = await obs.call(
+        simpleobsws.Request("GetSceneItemList", {"sceneName": scene})
+    )
+    sources = [
+        {"name": item["sourceName"], "visible": item["sceneItemEnabled"]}
+        # Reversed for the same reason as the scene list above.
+        for item in reversed(resp.responseData["sceneItems"])
+    ]
+    return {"scene": scene, "sources": sources}
+
+
 @app.post("/api/obs/scene")
 async def set_scene(req: SceneRequest):
     """Switch OBS to a different scene."""
