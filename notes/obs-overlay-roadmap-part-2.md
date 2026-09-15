@@ -15,12 +15,26 @@ Part 2 is about turning it from *working* into *something you'd trust on a live 
 ## The shape of Part 2
 
 ```
-Phase  9   Event delivery you can trust      ← infrastructure everything else leans on
-Phase 10   Channel point redeems             ← new event source
-Phase 11   The media overlay                 ← new output surface
-Phase 12   The bot speaks                    ← new identity
-Phase 13   Loot boxes                        ← composition of all of the above
+Phase  9   Event delivery you can trust      DONE  ← infrastructure everything else leans on
+Phase 10   Channel point redeems             DONE  ← new event source
+Phase 11   The media overlay                 DONE  ← new output surface
+Phase 12   The bot speaks                          ← new identity
+Phase 13   Loot boxes                              ← composition of all of the above
 ```
+
+**Phases 9–11 shipped 2026-09-15 and the project was tagged v1.0.** Notes on what differed from the
+plan below, written after the fact:
+
+- **Phase 10's re-auth:** the browser used whoever was already logged in, which was the *bot* account.
+  That silently rejected every subscription. The token must be authorized as the broadcaster; the app
+  registration living on the bot account is unrelated and normal.
+- **Phase 11's codec trap is real and worth the warning it gets below.** The clips arrived as 11×
+  H.264/AAC and one AV1, all transcoded to VP9/Opus before anything played.
+- **Phase 11's stall backstop needs care.** Implemented first as a fixed 30s cap, it truncated a 75s
+  clip at the halfway mark while the audio kept playing. It has to measure lack of progress, not
+  elapsed time.
+- **Interrupt-vs-queue:** the plan suggests short clips cut in. In practice losing 40s of a long clip
+  to a 2s bit was the wrong trade, and every reward now queues. The field remains per-reward.
 
 The order is deliberate. Each phase is worth more once the one before it exists, and Phase 13 is last precisely *because* it's the least foundational — it's the payoff, not the plumbing.
 
