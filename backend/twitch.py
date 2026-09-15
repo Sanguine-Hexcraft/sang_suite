@@ -12,7 +12,7 @@ so this module stays independent of FastAPI.
 
 import os
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from twitchAPI.eventsub.websocket import EventSubWebsocket
 from twitchAPI.helper import first
@@ -20,6 +20,7 @@ from twitchAPI.oauth import UserAuthenticationStorageHelper
 from twitchAPI.object.eventsub import (
     ChannelCheerEvent,
     ChannelFollowEvent,
+    ChannelPointsCustomRewardRedemptionAddEvent,
     ChannelRaidEvent,
     ChannelSubscribeEvent,
     ChannelSubscriptionMessageEvent,
@@ -27,11 +28,19 @@ from twitchAPI.object.eventsub import (
 from twitchAPI.twitch import Twitch
 from twitchAPI.type import AuthScope
 
+if TYPE_CHECKING:  # avoids a circular import; main.py imports this module
+    from main import RewardConfig
+
 # Raids need no scope; the other three each need the broadcaster's permission.
+# Every change to this list invalidates the cached token and forces a browser
+# re-authorize, so USER_READ_CHAT is added now despite being unused until the
+# loot box lands -- one re-auth instead of two.
 SCOPES = [
     AuthScope.MODERATOR_READ_FOLLOWERS,  # follows
-    AuthScope.CHANNEL_READ_SUBSCRIPTIONS,  # subs
+    AuthScope.CHANNEL_READ_SUBSCRIPTIONS,  # subs, resubs
     AuthScope.BITS_READ,  # cheers
+    AuthScope.CHANNEL_READ_REDEMPTIONS,  # channel point redeems (Phase 10)
+    AuthScope.USER_READ_CHAT,  # not used yet; see comment above
 ]
 
 # Where the user token + refresh token get cached, so you only authorize once.
@@ -42,6 +51,8 @@ TOKEN_FILE = Path(__file__).with_name(".twitch_tokens.json")
 # overlay already understands; `kind`, `user` and `amount` are additive, so
 # older overlay code keeps working and newer code can style per-event.
 AlertBroadcast = Callable[[dict], Awaitable[None]]
+# Returns the routing for a reward id, or None when it isn't configured.
+RewardLookup = Callable[[str], "RewardConfig | None"]
 
 
 def _alert(kind: str, user: str, text: str, amount: int | None = None) -> dict:
@@ -55,8 +66,9 @@ class TwitchAlerts:
     network), it says so and the rest of the backend carries on running.
     """
 
-    def __init__(self, broadcast: AlertBroadcast):
+    def __init__(self, broadcast: AlertBroadcast, reward_lookup: RewardLookup):
         self._broadcast = broadcast
+        self._reward_lookup = reward_lookup
         self._twitch: Twitch | None = None
         self._eventsub: EventSubWebsocket | None = None
 
@@ -119,6 +131,9 @@ class TwitchAlerts:
         resub_sub = await self._eventsub.listen_channel_subscription_message(
             uid, self._on_resub
         )
+        redeem_sub = await self._eventsub.listen_channel_points_custom_reward_redemption_add(
+            uid, self._on_redeem
+        )
         # Note the argument order: raid takes the callback FIRST, unlike the
         # three above. Easy to get wrong.
         raid_sub = await self._eventsub.listen_channel_raid(
@@ -138,6 +153,7 @@ class TwitchAlerts:
                 "channel.subscribe": sub_sub,
                 "channel.subscription.message": resub_sub,
                 "channel.cheer": cheer_sub,
+                "channel.channel_points_custom_reward_redemption.add": redeem_sub,
                 "channel.raid": raid_sub,
             }
             # -t is the *receiver* id for every one of these (the broadcaster
@@ -206,3 +222,37 @@ class TwitchAlerts:
         await self._broadcast(
             _alert("raid", name, f"{name} is raiding with {e.viewers}!", e.viewers)
         )
+
+    async def _on_redeem(
+        self, data: ChannelPointsCustomRewardRedemptionAddEvent
+    ) -> None:
+        """A viewer spent channel points.
+
+        Read-only by design: this app can only fulfil or refund redemptions for
+        rewards it created itself through the API, and yours live in the Twitch
+        dashboard. So react, never manage.
+        """
+        e = data.event
+        reward = e.reward
+        routing = self._reward_lookup(reward.id)
+
+        if routing is None:
+            # The discovery path. Printed copy-pasteable because looking an id
+            # up in the API explorer every time you add a reward is miserable.
+            print(
+                f"[redeem] unconfigured reward {reward.title!r} "
+                f"id={reward.id} cost={reward.cost} -- add it to config.json"
+            )
+            return
+
+        if "alert" not in routing.actions:
+            return
+
+        # A reward's own title is almost always what you want on screen, so
+        # `label` only has to be set when you want to override it.
+        title = routing.label or reward.title
+        text = f"{e.user_name} redeemed {title}!"
+        # user_input is "" for rewards that don't prompt for text.
+        if e.user_input:
+            text = f"{text} ({e.user_input})"
+        await self._broadcast(_alert("redeem", e.user_name, text, reward.cost))

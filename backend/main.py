@@ -67,6 +67,9 @@ DEFAULT_KINDS = {
     # "NEW SUBSCRIBER". Shares the sub fanfare.
     "resub": AlertKindConfig(label="RESUBSCRIBED", accent="#ffb347", sound="sub"),
     "cheer": AlertKindConfig(label="BITS INCOMING", accent="#4dd6ff", sound="cheer"),
+    # Channel point redeems (Phase 10). Teal, so it reads as its own category
+    # next to the four Twitch-money events.
+    "redeem": AlertKindConfig(label="REDEEMED", accent="#3ddc97", sound="levelup"),
     "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00", sound="raid"),
     # Manual alerts from /control arrive with no `kind` and land here.
     "generic": AlertKindConfig(label="ALERT", accent="#ff2d55", sound="levelup"),
@@ -83,8 +86,26 @@ class AlertConfig(BaseModel):
     kinds: dict[str, AlertKindConfig] = DEFAULT_KINDS
 
 
+class RewardConfig(BaseModel):
+    """What a channel point reward should do when redeemed.
+
+    Keyed by reward *id*, never title: titles get renamed on a whim and the id
+    is stable across renames. Unconfigured rewards log a copy-pasteable line at
+    redeem time rather than alerting, which is how you discover the ids.
+    """
+
+    # Shown on the overlay. None = use the reward's own title from Twitch, so
+    # the common case needs no text duplicated into config.
+    label: str | None = None
+    # Phase 10 only knows "alert"; "media" and "chat" arrive in 11 and 12.
+    # A plain list so a reward can do several things at once later.
+    actions: list[str] = ["alert"]
+
+
 class Config(BaseModel):
     alerts: AlertConfig = AlertConfig()
+    # Empty by default: a fresh install alerts on nothing until you add ids.
+    rewards: dict[str, RewardConfig] = {}
 
 
 def load_config() -> Config:
@@ -331,7 +352,17 @@ manager = ConnectionManager()
 # an automatic follow alert and a manually-triggered one are indistinguishable
 # to the overlay. Defined here (not above lifespan) because it needs `manager`;
 # lifespan only looks it up when the server actually starts.
-twitch_alerts = TwitchAlerts(manager.broadcast)
+def _reward_lookup(reward_id: str) -> RewardConfig | None:
+    """Current routing for a reward id, or None if it isn't configured.
+
+    A function rather than the dict itself because PUT /api/config rebinds
+    `config` wholesale -- a captured dict would go stale the first time you
+    save from the dashboard.
+    """
+    return config.rewards.get(reward_id)
+
+
+twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 
 
 @app.get("/api/health")
