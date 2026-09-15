@@ -257,11 +257,33 @@ class ConnectionManager:
         self.connections.append(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.connections.remove(ws)
+        # Tolerant of a socket that has already been dropped: broadcast() now
+        # evicts dead connections itself, so the /ws handler's disconnect can
+        # easily arrive second. A bare list.remove() raises ValueError there.
+        if ws in self.connections:
+            self.connections.remove(ws)
 
     async def broadcast(self, message: dict):
+        """Send to every overlay, surviving connections that have died.
+
+        A socket that went away without a clean close (OBS refreshing its
+        browser source, a closed dashboard tab, a slept laptop) still sits in
+        the list, because nothing notices until someone writes to it. Guarding
+        each send individually keeps one corpse from swallowing the alert for
+        every connection after it in the list -- which used to leave the
+        overlay silent until the backend was restarted.
+        """
+        payload = json.dumps(message)
+        dead: list[WebSocket] = []
         for ws in self.connections:
-            await ws.send_text(json.dumps(message))
+            try:
+                await ws.send_text(payload)
+            except (WebSocketDisconnect, RuntimeError):
+                dead.append(ws)
+        # Evicted after the loop, never during it: mutating a list while
+        # iterating it skips elements.
+        for ws in dead:
+            self.disconnect(ws)
 
 
 manager = ConnectionManager()
