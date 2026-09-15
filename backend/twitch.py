@@ -22,6 +22,7 @@ from twitchAPI.object.eventsub import (
     ChannelFollowEvent,
     ChannelRaidEvent,
     ChannelSubscribeEvent,
+    ChannelSubscriptionMessageEvent,
 )
 from twitchAPI.twitch import Twitch
 from twitchAPI.type import AuthScope
@@ -111,6 +112,13 @@ class TwitchAlerts:
         follow_sub = await self._eventsub.listen_channel_follow_v2(uid, uid, self._on_follow)
         sub_sub = await self._eventsub.listen_channel_subscribe(uid, self._on_subscribe)
         cheer_sub = await self._eventsub.listen_channel_cheer(uid, self._on_cheer)
+        # channel.subscribe fires for NEW subscribers only -- a renewal is a
+        # channel.subscription.message, which is why resubs never alerted.
+        # Same channel:read:subscriptions scope as channel.subscribe, so adding
+        # it needs no re-authorize.
+        resub_sub = await self._eventsub.listen_channel_subscription_message(
+            uid, self._on_resub
+        )
         # Note the argument order: raid takes the callback FIRST, unlike the
         # three above. Easy to get wrong.
         raid_sub = await self._eventsub.listen_channel_raid(
@@ -128,6 +136,7 @@ class TwitchAlerts:
             subs = {
                 "channel.follow": follow_sub,
                 "channel.subscribe": sub_sub,
+                "channel.subscription.message": resub_sub,
                 "channel.cheer": cheer_sub,
                 "channel.raid": raid_sub,
             }
@@ -166,6 +175,22 @@ class TwitchAlerts:
         if e.is_gift:
             text = f"{e.user_name} received a gift sub! (Tier {tier})"
         await self._broadcast(_alert("sub", e.user_name, text, int(tier)))
+
+    async def _on_resub(self, data: ChannelSubscriptionMessageEvent) -> None:
+        """A renewal. Carries the month count, which is the point of a resub."""
+        e = data.event
+        tier = (e.tier or "1000")[0]
+        months = e.cumulative_months
+        # cumulative_months is optional in the payload; without it, say less
+        # rather than printing "for None months".
+        if months:
+            plural = "" if months == 1 else "s"
+            text = f"{e.user_name} resubscribed for {months} month{plural}! (Tier {tier})"
+        else:
+            text = f"{e.user_name} resubscribed! (Tier {tier})"
+        # `amount` stays the tier, matching kind="sub" above -- the month count
+        # is already in the text and the overlay renders text only.
+        await self._broadcast(_alert("resub", e.user_name, text, int(tier)))
 
     async def _on_cheer(self, data: ChannelCheerEvent) -> None:
         e = data.event

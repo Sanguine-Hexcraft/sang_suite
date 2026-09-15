@@ -62,6 +62,9 @@ class AlertKindConfig(BaseModel):
 DEFAULT_KINDS = {
     "follow": AlertKindConfig(label="NEW FOLLOWER", accent="#b06bff", sound="follow"),
     "sub": AlertKindConfig(label="NEW SUBSCRIBER", accent="#ffd166", sound="sub"),
+    # Renewals, distinct from "sub" so a 14-month resub doesn't read
+    # "NEW SUBSCRIBER". Shares the sub fanfare.
+    "resub": AlertKindConfig(label="RESUBSCRIBED", accent="#ffb347", sound="sub"),
     "cheer": AlertKindConfig(label="BITS INCOMING", accent="#4dd6ff", sound="cheer"),
     "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00", sound="raid"),
     # Manual alerts from /control arrive with no `kind` and land here.
