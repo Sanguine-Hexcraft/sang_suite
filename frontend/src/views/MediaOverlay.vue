@@ -14,9 +14,13 @@ const showing = ref(false)
 // Images have no `ended` event, so they're a separate branch with a timer.
 const currentImage = ref<string | null>(null)
 
-// A clip that fails to load or stalls would otherwise wedge the queue forever,
-// since `ended` never fires. Generous enough not to truncate a real clip.
-const STALL_TIMEOUT_MS = 30_000
+// Watchdog for a clip that dies mid-playback: `ended` never fires, so without
+// this the queue would wedge forever. It measures LACK OF PROGRESS, not
+// elapsed time -- `timeupdate` fires several times a second while a video is
+// actually playing, and every one of them resets this. A fixed cap on total
+// playback would truncate any clip longer than the cap, which is a bug I
+// already shipped once: pumps.webm is 75s and got cut at 30s.
+const STALL_TIMEOUT_MS = 15_000
 // How long a still image (gif/webp) stays up. GIFs loop with no end event, so
 // this is the only thing that can end them.
 const IMAGE_MS = 6_000
@@ -53,49 +57,76 @@ watch(
 )
 
 function stopCurrent() {
-  const el = video.value
-  if (el) {
-    el.pause()
-    el.removeAttribute('src')
-    el.load()
-  }
   currentImage.value = null
   showing.value = false
   // Releases whatever `drain` is awaiting so the loop moves on immediately.
-  advance?.()
+  // `finish` owns tearing the <video> down, so this needs no element handling
+  // of its own -- and must not duplicate it, or the two paths can drift.
+  if (advance) {
+    advance()
+    return
+  }
+  // Nothing was mid-play (panic on an idle overlay); still make sure the
+  // element is quiet.
+  video.value?.pause()
 }
 
-/** Resolves when the clip ends, errors, or the stall timeout fires. */
+/** Resolves when the clip ends, errors, or stops making progress. */
 function playOne(media: MediaEvent): Promise<void> {
   return new Promise((resolve) => {
     let done = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
     const finish = () => {
       if (done) return
       done = true
       clearTimeout(timer)
       advance = null
+      // Stop the element before resolving. Hiding it with v-show leaves it
+      // playing -- that is how a truncated clip kept blaring its audio.
+      const el = video.value
+      if (el) {
+        el.pause()
+        el.ontimeupdate = null
+        el.onended = null
+        el.onerror = null
+        el.removeAttribute('src')
+        el.load()
+      }
       resolve()
     }
     advance = finish
-    const timer = setTimeout(finish, STALL_TIMEOUT_MS)
 
     if (isImage(media.src)) {
       currentImage.value = media.src
       showing.value = true
-      setTimeout(finish, IMAGE_MS)
+      // Gifs loop forever with no `ended` event, so a timer is the only thing
+      // that can end them. Safe here precisely because there is no playback to
+      // truncate -- unlike the video branch.
+      timer = setTimeout(finish, IMAGE_MS)
       return
     }
 
     const el = video.value
     if (!el) return finish()
+
+    const kick = () => {
+      clearTimeout(timer)
+      timer = setTimeout(finish, STALL_TIMEOUT_MS)
+    }
+
     el.src = media.src
     el.onended = finish
+    // Proof of life: resets the watchdog for as long as the clip is actually
+    // advancing, so length never matters, only stalling.
+    el.ontimeupdate = kick
     // A missing file or a codec OBS can't decode must not wedge the queue.
     el.onerror = () => {
       console.error('[media] failed to play', media.src)
       finish()
     }
     showing.value = true
+    kick() // covers the gap before the first timeupdate arrives
     // Autoplay with sound needs the browser source to allow it; OBS does.
     void el.play().catch((err) => {
       console.error('[media] play() rejected', err)
