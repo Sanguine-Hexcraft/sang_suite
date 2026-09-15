@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from collections import deque
 
 from contextlib import asynccontextmanager
@@ -285,6 +286,16 @@ app = FastAPI(lifespan=lifespan)
 # missing the backlog than dumping a minute of stale alerts on screen.
 HISTORY_LIMIT = 50
 
+# How many survive a restart, for the dashboard's activity feed. Smaller than
+# HISTORY_LIMIT on purpose: replay exists to cover a two-second blip, whereas
+# this is a human-readable record of what happened, and twenty rows is as far
+# back as anyone scrolls.
+ACTIVITY_LIMIT = 20
+
+# Gitignored: a log of what happened, not settings, and it is rewritten
+# constantly. Missing or corrupt means an empty feed, never a failed boot.
+ACTIVITY_PATH = Path(__file__).parent / "activity.json"
+
 
 class ConnectionManager:
     def __init__(self):
@@ -294,6 +305,42 @@ class ConnectionManager:
         # first real event is id 1 and "I have seen nothing" is a falsy 0.
         self._seq = 0
         self._history: deque[dict] = deque(maxlen=HISTORY_LIMIT)
+        self._load_activity()
+
+    # --- persistence --------------------------------------------------------
+    def _load_activity(self) -> None:
+        """Seed the history and the sequence from disk at startup.
+
+        Restoring `_seq` matters as much as the rows do. Without it the counter
+        restarts at 1 after a reboot, and an overlay that never reloaded is
+        still holding a much higher last_id -- so every new event looks older
+        than what it has already seen and it would silently receive no replay
+        until the count climbed back past its watermark.
+        """
+        if not ACTIVITY_PATH.exists():
+            return
+        try:
+            saved = json.loads(ACTIVITY_PATH.read_text())
+            events = saved["events"]
+            self._history.extend(events)
+            self._seq = max([saved.get("seq", 0), *(e.get("id", 0) for e in events)])
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            print(f"[activity] {ACTIVITY_PATH.name} unusable, starting empty: {exc}")
+
+    def _save_activity(self) -> None:
+        recent = list(self._history)[-ACTIVITY_LIMIT:]
+        try:
+            ACTIVITY_PATH.write_text(
+                json.dumps({"seq": self._seq, "events": recent}, indent=2) + "\n"
+            )
+        except OSError as exc:
+            # A feed that can't be written is not worth dropping an alert over.
+            print(f"[activity] Couldn't write {ACTIVITY_PATH.name}: {exc}")
+
+    @property
+    def recent(self) -> list[dict]:
+        """The last ACTIVITY_LIMIT events, oldest first."""
+        return list(self._history)[-ACTIVITY_LIMIT:]
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
@@ -340,8 +387,11 @@ class ConnectionManager:
         # one would blank a freshly reconnected overlay for no reason.
         if message.get("type") not in ("config", "panic"):
             self._seq += 1
-            message = {**message, "id": self._seq}
+            # `at` is stamped here rather than in the browser so a restored row
+            # shows when the event happened, not when the page loaded it.
+            message = {**message, "id": self._seq, "at": int(time.time() * 1000)}
             self._history.append(message)
+            self._save_activity()
         payload = json.dumps(message)
         dead: list[WebSocket] = []
         for ws in self.connections:
@@ -377,6 +427,16 @@ twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/activity")
+async def get_activity():
+    """The last events, oldest first, surviving refreshes and restarts.
+
+    The dashboard feed is otherwise pure in-memory state, so both a page
+    refresh and a backend restart used to blank it.
+    """
+    return {"events": manager.recent}
 
 
 @app.post("/api/panic")

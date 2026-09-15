@@ -76,6 +76,34 @@ export const useOverlayStore = defineStore('overlay', () => {
     config.value = await res.json()
   }
 
+  // The feed is otherwise in-memory only, so a refresh or a backend restart
+  // blanked it. The server persists the last events to disk; this seeds from
+  // them. Arrives oldest-first and the feed renders newest-first, hence the
+  // reverse.
+  async function loadActivity() {
+    try {
+      const res = await fetch('/api/activity')
+      if (!res.ok) return
+      const { events } = await res.json()
+      recentEvents.value = events
+        .map((e: OverlayEvent & { at?: number }) => toLogged(e))
+        .reverse()
+      // Don't replay what we've already been shown on screen.
+      const newest = events[events.length - 1]?.id
+      if (typeof newest === 'number' && newest > lastSeenId) lastSeenId = newest
+    } catch {
+      // A missing feed is not worth failing the dashboard over.
+    }
+  }
+
+  // `at` is stamped by the server so a restored row shows when the event
+  // happened rather than when the page loaded it; fall back for anything that
+  // predates that field. `id` is the server's sequence number, unique across
+  // restarts, which makes it a safe v-for key.
+  function toLogged(message: OverlayEvent & { at?: number }): LoggedEvent {
+    return { ...message, at: message.at ?? Date.now(), id: message.id ?? ++eventSeq }
+  }
+
   function connect() {
     // Already open or opening? Don't stack a second socket.
     if (socket && socket.readyState !== WebSocket.CLOSED) return
@@ -108,10 +136,13 @@ export const useOverlayStore = defineStore('overlay', () => {
         lastSeenId = message.id
       }
       lastEvent.value = message
+      // Panic is a command, not something that happened — it shouldn't leave
+      // a row in a record of the stream's events.
+      if (message.type === 'panic') return
       // Newest first, so the feed reads top-down without reversing in the
       // template. The relay echoes to every client including the sender, so
       // this logs manual and Twitch alerts alike.
-      recentEvents.value.unshift({ ...message, at: Date.now(), id: ++eventSeq })
+      recentEvents.value.unshift(toLogged(message))
       if (recentEvents.value.length > MAX_LOG) recentEvents.value.pop()
     }
   }
@@ -120,5 +151,14 @@ export const useOverlayStore = defineStore('overlay', () => {
     socket?.send(JSON.stringify(event))
   }
 
-  return { connected, lastEvent, recentEvents, config, connect, loadConfig, send }
+  return {
+    connected,
+    lastEvent,
+    recentEvents,
+    config,
+    connect,
+    loadConfig,
+    loadActivity,
+    send,
+  }
 })

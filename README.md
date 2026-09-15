@@ -133,6 +133,7 @@ layer independently in OBS.
 |---|---|---|---|
 | `GET` | `/api/health` | — | Health check, returns `{"status": "ok"}` |
 | `GET` | `/api/config` | — | Current widget settings |
+| `GET` | `/api/activity` | — | Last 20 events, oldest first; survives restarts |
 | `PUT` | `/api/config` | full config object | Replace settings, save to disk, push to overlays |
 | `POST` | `/api/panic` | — | Clear every queue and blank both overlays |
 | `GET` | `/api/obs/scenes` | — | Every scene, plus which is live |
@@ -159,6 +160,11 @@ history. A client sends `{"type": "hello", "last_id": N}` on connect and is sent
 The client's watermark lives in module scope, not `localStorage` — deliberately. It survives the
 reconnect loop (a backend restart, a network blip) but not a page reload, so a browser source opening
 fresh mid-stream starts clean instead of dumping an hour of backlog onto your canvas.
+
+The last 20 events are also written to gitignored `backend/activity.json`, which backs the dashboard's
+activity feed and outlives both a page refresh and a backend restart. The sequence counter is saved
+alongside them: if it reset to 1 on reboot, an overlay still holding a higher `last_id` would see
+every new event as older than what it had already seen and receive no replay at all.
 
 ## Settings
 
@@ -231,6 +237,7 @@ backend/
   requirements.txt   # pinned deps
   .env.example       # config template
   config.json        # widget settings + reward routing, written by /control (gitignored)
+  activity.json      # last 20 events, for the dashboard feed (gitignored)
   media/             # clips and gifs, served at /media (gitignored)
 frontend/
   src/

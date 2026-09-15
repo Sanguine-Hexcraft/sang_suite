@@ -35,6 +35,9 @@ onMounted(async () => {
   // Fire and forget: OBS may not be running, and that must not hold up the
   // rest of the dashboard loading.
   void loadScenes()
+  // Seeds the activity feed from disk so a refresh or a backend restart
+  // doesn't blank it.
+  void store.loadActivity()
   await store.loadConfig()
   draft.value = structuredClone(toRaw(store.config))
 })

@@ -60,3 +60,7 @@ config.json
 # change independently of the code — drop a file in and reference it in
 # config.json rather than committing it.
 backend/media/
+
+# Activity feed history — a log of what happened, not settings, rewritten
+# constantly. Recreated empty if absent.
+backend/activity.json
