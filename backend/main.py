@@ -638,9 +638,25 @@ class SPAStaticFiles(StaticFiles):
     /control and /overlay/alert are client-side routes with no matching file
     on disk, so a plain mount 404s on a hard refresh. Handing unknown paths to
     index.html lets vue-router take over once the page boots.
+
+    It also tells browsers to revalidate everything except the hashed bundles.
+    StaticFiles sends no Cache-Control, so Chromium (OBS's browser included)
+    guesses a freshness window from the file's age -- and a stale index.html
+    keeps pointing at bundles the last build deleted, until someone presses
+    "Refresh cache" by hand.
     """
 
     async def get_response(self, path: str, scope):
+        response = await self._get_or_fallback(path, scope)
+        # Vite puts a content hash in every filename under assets/, so a new
+        # build is a new URL and those can be cached for good. Anything else
+        # keeps its name across builds. "no-cache" doesn't mean "don't store":
+        # it means "ask first", which an unchanged file answers with a 304.
+        if not path.startswith("assets/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    async def _get_or_fallback(self, path: str, scope):
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:

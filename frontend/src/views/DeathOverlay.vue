@@ -9,9 +9,6 @@ import { playToll, primeAudio } from '@/audio/sounds'
 const store = useOverlayStore()
 
 const FALLBACK_VOLUME = 0.45
-// Long enough for the bell's hum to die away, so a second death in quick
-// succession re-flares instead of blending into the first.
-const FLARE_MS = 1800
 // How long a test death from /control holds its fake +1 before the real count
 // smokes back in.
 const TEST_HOLD_MS = 6000
@@ -32,17 +29,25 @@ const epitaph = computed(() => {
 // separator. textLength stretches it to exactly one lap of the ring.
 const RUNES = 'ᚠᚢᚦᚨᚱᚲᚷᚹ᛫ᚺᚾᛁᛃᛇᛈᛉᛊ᛫ᛏᛒᛖᛗᛚᛜᛞᛟ᛫'
 
-let flareTimer: ReturnType<typeof setTimeout> | undefined
 let testTimer: ReturnType<typeof setTimeout> | undefined
 
+const plaque = ref<HTMLElement | null>(null)
+
+// The flare is the `flaring` class: adding it plays the animations once, and
+// the plaque's own animationend takes it off again (see the template). There
+// used to be a setTimeout for the "off" and a requestAnimationFrame for the
+// "on", and that pair could jam: OBS stops frame callbacks for a source that
+// isn't on screen but keeps running timers, so a death off-scene had the
+// timer switch the flare off *before* the frame switched it on -- leaving it
+// on for good, and a class that's already there can't replay.
 async function flare() {
-  // Drop the class and re-add it on the next frame, or a death landing while
-  // the last flare is still running wouldn't restart the animation.
+  // To restart an animation that's mid-flight, the browser has to *see* the
+  // class gone. Swapping it out and back within one frame doesn't count:
+  // styles are only recalculated before paint, so it never notices the gap.
   flaring.value = false
-  await nextTick()
-  requestAnimationFrame(() => (flaring.value = true))
-  clearTimeout(flareTimer)
-  flareTimer = setTimeout(() => (flaring.value = false), FLARE_MS)
+  await nextTick() // the DOM no longer has the class...
+  void plaque.value?.offsetWidth // ...and reading layout forces a recalc now
+  flaring.value = true
   playToll(store.config?.alerts.volume ?? FALLBACK_VOLUME)
 }
 
@@ -78,7 +83,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  clearTimeout(flareTimer)
   clearTimeout(testTimer)
 })
 </script>
@@ -87,7 +91,17 @@ onUnmounted(() => {
 <template>
   <!-- Held back until the real count arrives: rendering a placeholder 0 first
        would play the smoke transition 0 -> N on every source refresh. -->
-  <div v-if="store.deaths" class="plaque" :class="{ flaring }">
+  <!-- animationend bubbles, and the spider and ring flare inside this div;
+       .self listens only for the plaque's own animation. All three run the
+       same 1.8s, so the plaque's ending is everyone's ending. A hidden source
+       doesn't animate, so this simply fires later -- it can't fire early. -->
+  <div
+    v-if="store.deaths"
+    ref="plaque"
+    class="plaque"
+    :class="{ flaring }"
+    @animationend.self="flaring = false"
+  >
     <div class="sigil" aria-hidden="true">
       <!-- Two wrappers so the slow drift and the one-shot burst each own a
            transform; animating both on one element would make them fight. -->
