@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from mnm import DeathWatcher
 from twitch import TwitchAlerts
 
 
@@ -267,7 +268,14 @@ async def lifespan(app: FastAPI):
         await twitch_alerts.start()
     except Exception as exc:
         print(f"[twitch] Startup failed, alerts disabled: {exc}")
+    # The death counter only reads local files, so it can't fail the way Twitch
+    # can -- but it's a nice-to-have too, and gets the same guard.
+    try:
+        death_watcher.start()
+    except Exception as exc:
+        print(f"[deaths] Startup failed, counter disabled: {exc}")
     yield
+    await death_watcher.stop()
     # Cancel the refresh if we're shutting down before it finished, so it can't
     # run against an OBS connection we're about to close.
     task = getattr(app.state, "refresh_task", None)
@@ -385,7 +393,9 @@ class ConnectionManager:
         # idempotent state, not events -- the overlay fetches /api/config on
         # mount anyway. Panic is a moment-in-time command: replaying a stale
         # one would blank a freshly reconnected overlay for no reason.
-        if message.get("type") not in ("config", "panic"):
+        # `deaths` (a reset or manual correction) is a state push like config;
+        # each carries the absolute count, so the overlay also fetches it fresh.
+        if message.get("type") not in ("config", "panic", "deaths"):
             self._seq += 1
             # `at` is stamped here rather than in the browser so a restored row
             # shows when the event happened, not when the page loaded it.
@@ -422,6 +432,7 @@ def _reward_lookup(reward_id: str) -> RewardConfig | None:
 
 
 twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
+death_watcher = DeathWatcher(manager.broadcast)
 
 
 @app.get("/api/health")
@@ -552,6 +563,32 @@ async def set_source_visibility(req: SourceRequest):
         )
     )
     return {"ok": True, "source": req.source, "visible": req.visible}
+
+
+# --- M&M death counter (Phase 14) ------------------------------------------
+class NudgeRequest(BaseModel):
+    delta: int = Field(ge=-10, le=10)
+
+
+@app.get("/api/deaths")
+async def get_deaths():
+    return death_watcher.snapshot()
+
+
+@app.post("/api/deaths/reset")
+async def reset_deaths():
+    """New stream: count deaths from now on."""
+    snapshot = death_watcher.reset()
+    await manager.broadcast({"type": "deaths", **snapshot})
+    return snapshot
+
+
+@app.post("/api/deaths/adjust")
+async def adjust_deaths(req: NudgeRequest):
+    """Manual correction -- e.g. -1 when the Ledger counted a death that wasn't."""
+    snapshot = death_watcher.nudge(req.delta)
+    await manager.broadcast({"type": "deaths", **snapshot})
+    return snapshot
 
 
 @app.websocket("/ws")

@@ -64,3 +64,7 @@ backend/media/
 # Activity feed history — a log of what happened, not settings, rewritten
 # constantly. Recreated empty if absent.
 backend/activity.json
+
+# Death counter session (Phase 14): when this stream started plus manual
+# corrections. Machine-local state; the count itself comes from the M&M Ledger.
+backend/deaths.json

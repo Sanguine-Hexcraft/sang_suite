@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
-import { useOverlayStore, type AppConfig } from '@/stores/overlay'
+import { useOverlayStore, type AppConfig, type DeathEvent } from '@/stores/overlay'
 import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
 // store: the shared Pinia store instance. useOverlayStore is
@@ -38,6 +38,7 @@ onMounted(async () => {
   // Seeds the activity feed from disk so a refresh or a backend restart
   // doesn't blank it.
   void store.loadActivity()
+  void store.loadDeaths()
   await store.loadConfig()
   draft.value = structuredClone(toRaw(store.config))
 })
@@ -202,6 +203,50 @@ async function panic() {
   setTimeout(() => (panicStatus.value = ''), 4000)
 }
 
+// --- death counter (Phase 14) ------------------------------------------
+// The count itself comes from the game's Ledger on the backend; these only
+// move the session's start or nudge the total. Each POST is answered with the
+// new state, and the backend broadcasts it too, so the overlay follows along.
+const deathStatus = ref('')
+
+async function deathCall(path: string, body?: object) {
+  deathStatus.value = ''
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    if (res.ok) store.deaths = await res.json()
+    else deathStatus.value = `error: ${res.status}`
+  } catch (e) {
+    deathStatus.value = `network error: ${e}`
+  }
+}
+
+function newStream() {
+  if (!confirm('Start a new stream? The death count goes back to 0.')) return
+  void deathCall('/api/deaths/reset')
+}
+
+// Rides the relay like a test alert, flagged so the overlay previews the
+// flare and bell on a fake +1 without the real count ever changing.
+function testDeath() {
+  const event: DeathEvent = {
+    type: 'death',
+    test: true,
+    count: (store.deaths?.count ?? 0) + 1,
+    character: 'Test',
+    zone: 'the Underdark',
+    text: 'Test death',
+  }
+  store.send(event)
+}
+
+function sinceTime(iso?: string) {
+  return iso ? clockTime(Date.parse(iso)) : '—'
+}
+
 // --- activity feed ------------------------------------------------------
 function clockTime(at: number) {
   return new Date(at).toLocaleTimeString([], { hour12: false })
@@ -297,6 +342,32 @@ function accentFor(kind?: string) {
           <button class="icon" title="Reload from OBS" @click="loadScenes">⟳</button>
         </div>
         <p class="status">{{ obsStatus || '—' }}</p>
+      </section>
+
+      <section class="card">
+        <h2>
+          Death Counter
+          <span class="status inline">
+            {{ store.deaths && !store.deaths.watching ? 'M&M not found' : '' }}
+          </span>
+        </h2>
+        <p class="death-count">{{ store.deaths?.count ?? '…' }}</p>
+        <p class="hint">
+          Since {{ sinceTime(store.deaths?.session_start) }}
+          <template v-if="store.deaths?.last">
+            · last: {{ store.deaths.last.character }} in {{ store.deaths.last.zone }}
+            at {{ sinceTime(store.deaths.last.at) }}
+          </template>
+        </p>
+        <div class="row">
+          <button class="primary" @click="newStream">New Stream</button>
+          <!-- For when the Ledger gets it wrong: it can't tell us about deaths
+               it didn't record, and act_02 might cover more than dying. -->
+          <button class="icon" title="One fewer" @click="deathCall('/api/deaths/adjust', { delta: -1 })">−1</button>
+          <button class="icon" title="One more" @click="deathCall('/api/deaths/adjust', { delta: 1 })">+1</button>
+          <button @click="testDeath">Test Death</button>
+        </div>
+        <p class="status">{{ deathStatus || 'OBS source: localhost:8000/overlay/deaths (420 × 180)' }}</p>
       </section>
 
       <section class="card wide" v-if="draft">
@@ -641,6 +712,12 @@ button:disabled:hover {
   border: 1px solid;
   border-radius: 3px;
   text-transform: uppercase;
+}
+
+.death-count {
+  margin: 0;
+  font-size: 2.6rem;
+  line-height: 1;
 }
 
 .feed .text {

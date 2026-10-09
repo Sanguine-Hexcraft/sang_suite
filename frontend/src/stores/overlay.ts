@@ -27,6 +27,37 @@ export interface MediaEvent extends OverlayEvent {
   interrupt: boolean // cut in, or wait its turn
 }
 
+// A Monsters & Memories death (Phase 14), read off the game's Ledger by
+// backend/mnm.py. `count` is absolute -- this stream's total including this
+// death -- so a replayed or reordered message can't make the overlay drift.
+// `test` marks one fired from /control to preview the effect.
+export interface DeathEvent extends OverlayEvent {
+  type: 'death'
+  count: number
+  character: string
+  zone: string
+  level?: number | null
+  at?: string
+  test?: boolean
+}
+
+export interface DeathInfo {
+  at: string
+  character: string
+  server: string
+  zone: string
+  level: number | null
+}
+
+// The counter's state as GET /api/deaths returns it, and as `type: 'deaths'`
+// pushes carry it after a reset or manual correction.
+export interface DeathState {
+  count: number
+  session_start: string // ISO, when "New stream" was last pressed
+  last: DeathInfo | null
+  watching: string | null // the M&M settings folder, or null if not found
+}
+
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
 // over HTTP on load, then kept fresh by `type: 'config'` relay messages.
 export interface AlertKindConfig {
@@ -68,6 +99,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const lastEvent = ref<OverlayEvent | null>(null)
   const recentEvents = ref<LoggedEvent[]>([])
   const config = ref<AppConfig | null>(null)
+  const deaths = ref<DeathState | null>(null)
   let socket: WebSocket | null = null
   let eventSeq = 0
 
@@ -104,6 +136,18 @@ export const useOverlayStore = defineStore('overlay', () => {
     return { ...message, at: message.at ?? Date.now(), id: message.id ?? ++eventSeq }
   }
 
+  // Seeded over HTTP and re-fetched on every reconnect: a reset pushed while a
+  // socket was down isn't replayed (it's state, not an event), so this is
+  // what catches the overlay up after a backend restart.
+  async function loadDeaths() {
+    try {
+      const res = await fetch('/api/deaths')
+      if (res.ok) deaths.value = await res.json()
+    } catch {
+      // No backend yet; the reconnect will try again.
+    }
+  }
+
   function connect() {
     // Already open or opening? Don't stack a second socket.
     if (socket && socket.readyState !== WebSocket.CLOSED) return
@@ -130,10 +174,28 @@ export const useOverlayStore = defineStore('overlay', () => {
         config.value = message.config
         return
       }
+      // Same idea for the death counter's state pushes: a reset or a -1 isn't
+      // something that happened on stream, so it skips lastEvent and the feed.
+      if (message.type === 'deaths') {
+        const { type: _type, ...state } = message
+        deaths.value = state
+        return
+      }
       // Track before dispatch so a replayed batch advances the watermark even
       // if a later handler throws.
       if (typeof message.id === 'number' && message.id > lastSeenId) {
         lastSeenId = message.id
+      }
+      // A real death moves the counter too, so the dashboard card and the
+      // overlay can both render straight from `deaths`. Test deaths don't --
+      // they're a preview, and the overlay fakes its own +1 for them.
+      if (message.type === 'death' && !message.test && deaths.value) {
+        const { character, server = '', zone, level = null, at = '' } = message
+        deaths.value = {
+          ...deaths.value,
+          count: message.count,
+          last: { character, server, zone, level, at },
+        }
       }
       lastEvent.value = message
       // Panic is a command, not something that happened — it shouldn't leave
@@ -156,8 +218,10 @@ export const useOverlayStore = defineStore('overlay', () => {
     lastEvent,
     recentEvents,
     config,
+    deaths,
     connect,
     loadConfig,
+    loadDeaths,
     loadActivity,
     send,
   }
