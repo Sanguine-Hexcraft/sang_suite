@@ -17,6 +17,9 @@ scenes from the same dashboard. Everything runs locally — no cloud service, no
   row play in order.
 - **OBS control** — switch scenes and show/hide sources from the dashboard, picking from dropdowns
   populated by OBS itself.
+- **Death counter** — a corner overlay counting this stream's Monsters & Memories deaths, read live
+  from the game's own event journal (the Ledger). Underdark-grimoire styling: a Lolth spider sigil in a
+  ring of runes, a candle-lit blackletter count, and a bell on every death.
 - **Panic button** — one click clears every queue and blanks both overlays.
 - **Reliable delivery** — every event carries a sequence id and the last 50 are replayed to an overlay
   that reconnects, so an alert landing during a blip isn't lost.
@@ -115,6 +118,12 @@ cache by hand every time an overlay changes.
 
 On the media source also tick **Control audio via OBS**, or clip audio never reaches your mix.
 
+The death counter is a corner widget, not a full-canvas page: add
+`http://localhost:8000/overlay/deaths` at about **420×180** and position it where you like. Tick
+**Control audio via OBS** on it too if you want the bell in your mix. Press **New Stream** on the
+dashboard's Death Counter card when you go live. A session older than 6 hours is also replaced
+automatically when the backend starts.
+
 ## Routes
 
 | Route | Purpose |
@@ -122,6 +131,7 @@ On the media source also tick **Control audio via OBS**, or clip audio never rea
 | `/control` | Control panel — alerts, OBS scene/source controls, panic, status |
 | `/overlay/alert` | Transparent alert overlay for an OBS browser source |
 | `/overlay/media` | Clip and gif overlay — its own browser source |
+| `/overlay/deaths` | M&M death counter — a small corner widget |
 
 The two overlays are separate pages on purpose. Sharing one would mean a video and a follow alert
 fighting over a single DOM and a single audio context; as separate browser sources they compose and
@@ -140,6 +150,9 @@ layer independently in OBS.
 | `GET` | `/api/obs/sources?scene=` | — | Sources in one scene, with visibility |
 | `POST` | `/api/obs/scene` | `{"scene": "..."}` | Switch the active OBS scene |
 | `POST` | `/api/obs/source` | `{"scene": "...", "source": "...", "visible": true}` | Show/hide a source |
+| `GET` | `/api/deaths` | — | This stream's death count, session start, last death |
+| `POST` | `/api/deaths/reset` | — | New stream: count from now |
+| `POST` | `/api/deaths/adjust` | `{"delta": -1}` | Manual correction (±10 max per call) |
 | `WS` | `/ws` | — | Event relay; messages are broadcast to all connected clients |
 
 Alert messages are plain JSON: `{ "type": "alert", "text": "New Follower: Innoruuk" }`
@@ -150,6 +163,11 @@ overlay looks `kind` up in the config to pick a headline and accent colour; manu
 
 Media messages are their own type, read only by `/overlay/media`:
 `{ "type": "media", "src": "/media/videos/bait.webm", "title": "...", "user": "...", "interrupt": false }`
+
+Deaths come from the backend, not the dashboard:
+`{ "type": "death", "count": 7, "character": "...", "zone": "Blindmidden", "text": "... died in Blindmidden" }`.
+`count` is the absolute total for the stream, so a replayed message can't make the overlay drift. A reset or
+manual correction is pushed as `{ "type": "deaths", ...state }` and, like `config`, is not replayed.
 
 ### Delivery guarantees
 
@@ -234,10 +252,12 @@ backend/
   main.py            # the entire backend: relay, OBS controller, routes, settings
   twitch.py          # EventSub client — follows, subs, resubs, cheers, raids, redeems
   chat.py            # bot chat sending (stub; Phase 12)
+  mnm.py             # M&M Ledger watcher for the death counter (Phase 14)
   requirements.txt   # pinned deps
   .env.example       # config template
   config.json        # widget settings + reward routing, written by /control (gitignored)
   activity.json      # last 20 events, for the dashboard feed (gitignored)
+  deaths.json        # death counter session start + manual corrections (gitignored)
   media/             # clips and gifs, served at /media (gitignored)
 frontend/
   src/
@@ -245,6 +265,7 @@ frontend/
       ControlView.vue    # /control
       AlertOverlay.vue   # /overlay/alert
       MediaOverlay.vue   # /overlay/media
+      DeathOverlay.vue   # /overlay/deaths
     stores/overlay.ts    # Pinia store wrapping the WebSocket
     audio/sounds.ts      # synthesised per-kind jingles
     router/index.ts      # route declarations

@@ -95,3 +95,52 @@ export function playSound(name = DEFAULT_SOUND, volume = 0.45) {
     if (last && jingle.sparkle) blip(at, freq * 2, jingle.tail, volume * 0.35)
   })
 }
+
+/**
+ * A single struck partial: instant attack, then a long exponential decay. The
+ * jingle `blip` above holds its level before releasing, which reads as an
+ * organ; a bell has to start dying the moment it's hit.
+ */
+function strike(at: number, freq: number, dur: number, vol: number) {
+  const ac = context()
+  const osc = ac.createOscillator()
+  osc.type = 'sine'
+  osc.frequency.setValueAtTime(freq, at)
+
+  const gain = ac.createGain()
+  gain.gain.setValueAtTime(0, at)
+  gain.gain.linearRampToValueAtTime(vol, at + 0.004)
+  gain.gain.exponentialRampToValueAtTime(0.0001, at + dur)
+
+  osc.connect(gain).connect(ac.destination)
+  osc.start(at)
+  osc.stop(at + dur + 0.02)
+}
+
+// A bell's overtones aren't whole multiples of the fundamental -- that
+// inharmonic spread is what makes it a bell rather than a note. Ratios loosely
+// after a church bell's hum/prime/tierce/quint/nominal, each with how loud it
+// starts and how long it rings. The low ones ring longest, as in a real bell.
+const BELL_PARTIALS: [ratio: number, gain: number, ring: number][] = [
+  [0.5, 0.55, 5.5], // hum
+  [1, 1, 4.0], // prime
+  [1.19, 0.45, 3.0], // minor tierce -- the mournful one
+  [1.5, 0.3, 2.4], // quint
+  [2, 0.4, 2.0], // nominal
+  [2.74, 0.15, 1.2],
+]
+
+/**
+ * The death counter's knell (Phase 14): one low bell strike. Its own function
+ * rather than a SOUNDS entry, since it isn't a jingle and shouldn't show up in
+ * the alert kinds' sound pickers.
+ */
+export function playToll(volume = 0.45) {
+  const ac = context()
+  const at = ac.currentTime + 0.02
+  const fundamental = 110 // A2
+  // The partials sum, so scale each down or the strike clips.
+  for (const [ratio, gain, ring] of BELL_PARTIALS) {
+    strike(at, fundamental * ratio, ring, volume * gain * 0.4)
+  }
+}
