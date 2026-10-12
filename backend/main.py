@@ -366,7 +366,9 @@ class ConnectionManager:
         missed = [m for m in self._history if m["id"] > last_id]
         for message in missed:
             try:
-                await ws.send_text(json.dumps(message))
+                # Flagged so a client can tell catch-up from live: a replayed
+                # death's count is stale by definition, for one.
+                await ws.send_text(json.dumps({**message, "replay": True}))
             except (WebSocketDisconnect, RuntimeError):
                 # Died mid-replay; broadcast() will evict it on the next event.
                 return 0
@@ -395,7 +397,10 @@ class ConnectionManager:
         # one would blank a freshly reconnected overlay for no reason.
         # `deaths` (a reset or manual correction) is a state push like config;
         # each carries the absolute count, so the overlay also fetches it fresh.
-        if message.get("type") not in ("config", "panic", "deaths"):
+        # A `test` death is a preview of the flare: replaying one after a
+        # reconnect would put a fake +1 and a bell on air, and saving it would
+        # leave "Test death" rows in the feed for good.
+        if message.get("type") not in ("config", "panic", "deaths") and not message.get("test"):
             self._seq += 1
             # `at` is stamped here rather than in the browser so a restored row
             # shows when the event happened, not when the page loaded it.

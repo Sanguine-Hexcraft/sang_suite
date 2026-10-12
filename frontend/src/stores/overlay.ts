@@ -7,6 +7,9 @@ export interface OverlayEvent {
   // Phase 9: a monotonic id stamped by the server on every broadcast. Used to
   // ask for the gap after a reconnect; config pushes deliberately carry none.
   id?: number
+  // Set by the server on messages sent as catch-up after a reconnect, as
+  // opposed to live ones.
+  replay?: boolean
   // Added in Phase 7. The overlay only needs type/text to render, but Twitch
   // alerts also carry these so views can style per-event later without a change
   // to the backend. kind = follow | sub | cheer | raid; amount = bits / raid
@@ -29,15 +32,16 @@ export interface MediaEvent extends OverlayEvent {
 
 // A Monsters & Memories death (Phase 14), read off the game's Ledger by
 // backend/mnm.py. `count` is absolute -- this stream's total including this
-// death -- so a replayed or reordered message can't make the overlay drift.
-// `test` marks one fired from /control to preview the effect.
+// death. `died_at` is the Ledger's ISO time; it can't be `at`, which the relay
+// overwrites with its own epoch-ms stamp. `test` marks one fired from /control
+// to preview the effect.
 export interface DeathEvent extends OverlayEvent {
   type: 'death'
   count: number
   character: string
   zone: string
   level?: number | null
-  at?: string
+  died_at?: string
   test?: boolean
 }
 
@@ -188,9 +192,12 @@ export const useOverlayStore = defineStore('overlay', () => {
       }
       // A real death moves the counter too, so the dashboard card and the
       // overlay can both render straight from `deaths`. Test deaths don't --
-      // they're a preview, and the overlay fakes its own +1 for them.
-      if (message.type === 'death' && !message.test && deaths.value) {
-        const { character, server = '', zone, level = null, at = '' } = message
+      // they're a preview, and the overlay fakes its own +1 for them. Nor do
+      // replayed ones: their count is from before whatever reset or -1 also
+      // happened while we were away, and loadDeaths() on reconnect already
+      // fetched the current total.
+      if (message.type === 'death' && !message.test && !message.replay && deaths.value) {
+        const { character, server = '', zone, level = null, died_at: at = '' } = message
         deaths.value = {
           ...deaths.value,
           count: message.count,
