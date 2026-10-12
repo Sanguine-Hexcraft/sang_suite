@@ -12,6 +12,12 @@ const FALLBACK_VOLUME = 0.45
 // How long a test death from /control holds its fake +1 before the real count
 // smokes back in.
 const TEST_HOLD_MS = 6000
+// The flare's length (see the CSS). Deaths closer together than this share
+// one flare and one bell rather than stacking tolls on top of each other --
+// a reconnect replays every missed death back to back, and two deaths can
+// land in the same 2 s poll.
+const FLARE_MS = 1800
+let lastFlareAt = -Infinity
 
 const flaring = ref(false)
 // A test death previews the effect without touching the real count: +1 here,
@@ -41,6 +47,9 @@ const plaque = ref<HTMLElement | null>(null)
 // timer switch the flare off *before* the frame switched it on -- leaving it
 // on for good, and a class that's already there can't replay.
 async function flare() {
+  const now = performance.now()
+  if (now - lastFlareAt < FLARE_MS) return
+  lastFlareAt = now
   // To restart an animation that's mid-flight, the browser has to *see* the
   // class gone. Swapping it out and back within one frame doesn't count:
   // styles are only recalculated before paint, so it never notices the gap.
@@ -56,6 +65,7 @@ watch(() => store.lastEvent, (event) => {
     clearTimeout(testTimer)
     testBump.value = 0
     flaring.value = false
+    lastFlareAt = -Infinity
     return
   }
   if (event?.type !== 'death') return

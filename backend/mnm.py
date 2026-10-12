@@ -24,6 +24,7 @@ Like twitch.py this knows nothing about FastAPI: main.py injects `broadcast`.
 
 import asyncio
 import base64
+import itertools
 import json
 import os
 from dataclasses import dataclass
@@ -79,7 +80,9 @@ def _parse_time(stamp: str) -> datetime:
     # trimming to microseconds costs nothing.
     head, dot, rest = stamp.partition(".")
     if dot:
-        digits = "".join(c for c in rest if c.isdigit())
+        # Only the run of digits right after the dot: the offset that follows
+        # ("-05:00") has digits too, and counting those swallowed it.
+        digits = "".join(itertools.takewhile(str.isdigit, rest))
         rest = digits[:6] + rest[len(digits):]
         stamp = f"{head}.{rest}"
     at = datetime.fromisoformat(stamp)
@@ -156,6 +159,13 @@ class DeathWatcher:
         self._files: dict[Path, tuple[float, list[Death]]] = {}
         # Deaths already announced, so a file rewrite doesn't re-alert them.
         self._announced: set[Death] = set()
+        # This stream's deaths, sorted. Rebuilt only when a file changes or the
+        # session resets, not on every 2 s poll: _files grows with every day
+        # played, and re-sorting all of it each pass would grow with it.
+        self._session: list[Death] | None = None
+        # When the watcher first scanned. Anything older happened before we
+        # were watching, so it counts but never alerts -- see _announce_new.
+        self._watch_from: datetime | None = None
         self.session_start, self.adjust = self._load_state()
 
     # --- state ----------------------------------------------------------------
@@ -184,8 +194,10 @@ class DeathWatcher:
 
     # --- counting -------------------------------------------------------------
     def session_deaths(self) -> list[Death]:
-        deaths = {d for _, ds in self._files.values() for d in ds if d.at >= self.session_start}
-        return sorted(deaths, key=lambda d: d.at)
+        if self._session is None:
+            deaths = {d for _, ds in self._files.values() for d in ds if d.at >= self.session_start}
+            self._session = sorted(deaths, key=lambda d: d.at)
+        return self._session
 
     def snapshot(self) -> dict:
         deaths = self.session_deaths()
@@ -201,6 +213,7 @@ class DeathWatcher:
         """Start a new stream: count from now, forget manual corrections."""
         self.session_start = datetime.now(timezone.utc)
         self.adjust = 0
+        self._session = None
         self._save_state(self.session_start, self.adjust)
         return self.snapshot()
 
@@ -212,14 +225,24 @@ class DeathWatcher:
         return self.snapshot()
 
     # --- polling --------------------------------------------------------------
-    def _scan(self) -> None:
-        """Re-parse any Ledger file that changed since the last pass."""
-        if self._settings_dir is None or not self._settings_dir.is_dir():
-            self._settings_dir = find_settings_dir()
-            if self._settings_dir is None:
-                return
-            print(f"[deaths] Watching {self._settings_dir}")
-        for path in self._settings_dir.glob("*/*/Ledger/*_Character_*.json"):
+    def _scan(self) -> bool:
+        """Re-parse any Ledger file that changed since the last pass.
+
+        Returns whether anything did, so a quiet poll costs no recount.
+        """
+        # Re-discovered every pass, not only when the cached folder vanishes:
+        # an update leaves the old prefix on disk, so "still exists" would keep
+        # us reading a dead one. It's one glob and a few stats.
+        settings_dir = find_settings_dir()
+        if settings_dir is None:
+            return False
+        if settings_dir != self._settings_dir:
+            print(f"[deaths] Watching {settings_dir}")
+            self._settings_dir = settings_dir
+        changed = False
+        seen: set[Path] = set()
+        for path in settings_dir.glob("*/*/Ledger/*_Character_*.json"):
+            seen.add(path)
             try:
                 mtime = path.stat().st_mtime
             except OSError:
@@ -229,38 +252,58 @@ class DeathWatcher:
                 continue
             try:
                 self._files[path] = (mtime, _deaths_in(path))
+                changed = True
             except (ValueError, OSError):
                 # Most likely caught the game mid-rewrite. Leave the old entry
                 # (if any) in place and try again next poll.
                 continue
+        # Drop files that are gone, including a whole old prefix after a
+        # switch, so they stop counting.
+        for path in self._files.keys() - seen:
+            del self._files[path]
+            changed = True
+        if changed:
+            self._session = None
+        return changed
 
     async def _run(self) -> None:
-        # The first pass only learns what's already there: a restart mid-stream
-        # must not replay every death so far as fresh alerts.
-        await asyncio.to_thread(self._scan)
-        self._announced.update(self.session_deaths())
         while True:
-            await asyncio.sleep(POLL_SECONDS)
+            # Everything inside the try, the first pass included: a task that
+            # raises just stops, silently, and the counter with it.
             try:
-                await asyncio.to_thread(self._scan)
-                await self._announce_new()
+                changed = await asyncio.to_thread(self._scan)
+                if self._watch_from is None:
+                    # The first pass only learns what's already there: a
+                    # restart mid-stream must not replay every death so far.
+                    self._watch_from = datetime.now(timezone.utc)
+                    self._announced.update(self.session_deaths())
+                elif changed:
+                    await self._announce_new()
             except Exception as exc:  # never let one bad pass kill the loop
                 print(f"[deaths] Poll failed: {exc}")
+            await asyncio.sleep(POLL_SECONDS)
 
     async def _announce_new(self) -> None:
         deaths = self.session_deaths()
-        fresh = [d for d in deaths if d not in self._announced]
+        # The time check covers a file that was mid-write on the first pass:
+        # its deaths missed the seeding above, but they predate the watcher, so
+        # they still count without ringing the bell all over again.
+        fresh = [d for d in deaths if d not in self._announced and d.at > self._watch_from]
+        self._announced.update(deaths)
         if not fresh:
             return
         # Count each one in turn, so two deaths in one poll tick up 1, 2.
         before = len(deaths) - len(fresh)
         for i, death in enumerate(fresh, start=1):
-            self._announced.add(death)
+            info = death.as_dict()
+            # The relay stamps its own `at` (when it relayed, in epoch ms) over
+            # whatever a message carries, so the Ledger time travels as died_at.
+            info["died_at"] = info.pop("at")
             await self._broadcast(
                 {
                     "type": "death",
                     "count": max(0, before + i + self.adjust),
-                    **death.as_dict(),
+                    **info,
                     "text": f"{death.character} died in {death.zone}",
                 }
             )
