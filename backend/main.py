@@ -75,6 +75,9 @@ DEFAULT_KINDS = {
     # next to the four Twitch-money events.
     "redeem": AlertKindConfig(label="REDEEMED", accent="#3ddc97", sound="levelup"),
     "raid": AlertKindConfig(label="INCOMING RAID", accent="#ff7a00", sound="raid"),
+    # From the M&M Ledger (ledger.py), not Twitch. Pink, the one Dracula hue no
+    # Twitch kind is near; and the jingle finally lives up to its name.
+    "level_up": AlertKindConfig(label="LEVEL UP", accent="#ff79c6", sound="levelup"),
     # Manual alerts from /control arrive with no `kind` and land here.
     "generic": AlertKindConfig(label="ALERT", accent="#ff2d55", sound="levelup"),
 }

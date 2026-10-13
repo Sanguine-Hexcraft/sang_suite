@@ -69,6 +69,11 @@ KINDS = {
 # Kinds worth a live message, when they're your own. Everything is stored, but
 # loot and harvests land every few seconds and would bury the activity feed.
 ANNOUNCE = {"level_up"}
+# The announced kinds that go on stream: sent as `type: "alert"` with the kind
+# as the alert kind, so each also needs an entry in main.py's DEFAULT_KINDS
+# *and* config.json. The rest go out as `type: "ledger"`, which only the
+# activity feed shows.
+ALERTS = {"level_up"}
 
 # What the Character file also records -- the Social copies of these are the
 # mirrors. Party events live only in Social, so those are never mirrors.
@@ -197,10 +202,13 @@ COLUMNS = (
 INSERT = f"INSERT OR IGNORE INTO events VALUES ({', '.join('?' * len(COLUMNS))})"
 
 
+def _new_level(row: dict) -> int | None:
+    return json.loads(row["detail"]).get("d21", row["level"])
+
+
 def _describe(row: dict) -> str:
     if row["kind"] == "level_up":
-        new_level = json.loads(row["detail"]).get("d21", row["level"])
-        return f"{row['actor']} reached level {new_level}"
+        return f"{row['actor']} reached level {_new_level(row)}"
     return f"{row['actor']}: {row['kind']}"
 
 
@@ -291,9 +299,14 @@ class LedgerIngester:
             message = {k: row[k] for k in COLUMNS if k not in ("id", "at", "detail")}
             # The relay stamps its own `at` over a message's, so the Ledger
             # time travels as happened_at -- as died_at does for deaths.
-            await self._broadcast(
-                {"type": "ledger", **message, "happened_at": row["at"], "text": _describe(row)}
-            )
+            message |= {"happened_at": row["at"], "text": _describe(row)}
+            if row["kind"] in ALERTS:
+                # The alert shape twitch.py sends: user, and amount -- here the
+                # new level.
+                message |= {"type": "alert", "user": row["actor"], "amount": _new_level(row)}
+            else:
+                message["type"] = "ledger"
+            await self._broadcast(message)
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
