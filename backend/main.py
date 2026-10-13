@@ -445,7 +445,7 @@ def _reward_lookup(reward_id: str) -> RewardConfig | None:
 
 twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 death_watcher = DeathWatcher(manager.broadcast)
-ledger_ingester = LedgerIngester()
+ledger_ingester = LedgerIngester(manager.broadcast)
 
 
 @app.get("/api/health")

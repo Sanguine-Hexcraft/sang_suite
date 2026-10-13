@@ -39,7 +39,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mnm import _parse_time, find_settings_dir
+from mnm import Broadcast, _parse_time, find_settings_dir
 
 POLL_SECONDS = 2.0
 DB_PATH = Path(__file__).with_name("ledger.db")
@@ -66,6 +66,10 @@ KINDS = {
     "act_34": "party_leave",
     "act_35": "party_leader",
 }
+# Kinds worth a live message, when they're your own. Everything is stored, but
+# loot and harvests land every few seconds and would bury the activity feed.
+ANNOUNCE = {"level_up"}
+
 # What the Character file also records -- the Social copies of these are the
 # mirrors. Party events live only in Social, so those are never mirrors.
 _MIRRORED = {"level_up", "loot", "coin_loot"}
@@ -186,17 +190,30 @@ def _decode(path: Path, event: dict) -> tuple | None:
     )
 
 
-INSERT = f"INSERT OR IGNORE INTO events VALUES ({', '.join('?' * 17)})"
+COLUMNS = (
+    "id", "at", "server", "owner", "actor", "source", "mirror", "code", "kind", "zone",
+    "level", "mob", "item", "qty", "copper", "partner", "detail",
+)
+INSERT = f"INSERT OR IGNORE INTO events VALUES ({', '.join('?' * len(COLUMNS))})"
+
+
+def _describe(row: dict) -> str:
+    if row["kind"] == "level_up":
+        new_level = json.loads(row["detail"]).get("d21", row["level"])
+        return f"{row['actor']} reached level {new_level}"
+    return f"{row['actor']}: {row['kind']}"
 
 
 class LedgerIngester:
     """Polls every Ledger file and copies new events into SQLite.
 
     Owns the database: one connection, guarded by a lock, because polls run in
-    a worker thread while API reads come from the event loop.
+    a worker thread while API reads come from the event loop. New events of an
+    ANNOUNCE kind are broadcast as `type: "ledger"` messages.
     """
 
-    def __init__(self, db_path: Path = DB_PATH):
+    def __init__(self, broadcast: Broadcast, db_path: Path = DB_PATH):
+        self._broadcast = broadcast
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(SCHEMA)
@@ -205,20 +222,23 @@ class LedgerIngester:
         self._settings_dir: Path | None = None
         # path -> mtime it was last ingested at, so a quiet poll reads nothing.
         self._mtimes: dict[Path, float] = {}
+        # When the first scan finished. Rows older than this predate the
+        # watcher and are never announced -- see _announce.
+        self._watch_from: datetime | None = None
 
     # --- ingesting ------------------------------------------------------------
-    def _scan(self) -> int:
-        """Ingest every Ledger file that changed. Returns how many rows were new."""
+    def _scan(self) -> list[dict]:
+        """Ingest every Ledger file that changed. Returns the rows that were new."""
         # Re-discovered each pass for the same reason as DeathWatcher: an update
         # can leave a dead prefix behind that still "exists".
         settings_dir = find_settings_dir()
         if settings_dir is None:
-            return 0
+            return []
         if settings_dir != self._settings_dir:
             print(f"[ledger] Watching {settings_dir}")
             self._settings_dir = settings_dir
             self._mtimes.clear()
-        added = 0
+        added: list[dict] = []
         for path in settings_dir.glob("*/*/Ledger/**/*.json"):
             try:
                 mtime = path.stat().st_mtime
@@ -231,10 +251,12 @@ class LedgerIngester:
                 continue
             events = data.get("c01", []) if isinstance(data, dict) else []
             rows = [r for r in (_decode(path, e) for e in events) if r is not None]
+            # One execute per row rather than executemany, because rowcount is
+            # the only way INSERT OR IGNORE says which rows it actually kept.
             with self._lock, self._db:
-                before = self._db.total_changes
-                self._db.executemany(INSERT, rows)
-                added += self._db.total_changes - before
+                for row in rows:
+                    if self._db.execute(INSERT, row).rowcount:
+                        added.append(dict(zip(COLUMNS, row)))
             self._mtimes[path] = mtime
         return added
 
@@ -242,11 +264,36 @@ class LedgerIngester:
         while True:
             try:
                 added = await asyncio.to_thread(self._scan)
-                if added:
-                    print(f"[ledger] +{added} events")
+                if self._watch_from is None:
+                    # The first pass is the backfill: everything already on
+                    # disk, none of it news. A restart must not replay it.
+                    self._watch_from = datetime.now(timezone.utc)
+                    print(f"[ledger] Ingested {len(added)} existing events")
+                elif added:
+                    await self._announce(added)
             except Exception as exc:  # never let one bad pass kill the loop
                 print(f"[ledger] Poll failed: {exc}")
             await asyncio.sleep(POLL_SECONDS)
+
+    async def _announce(self, rows: list[dict]) -> None:
+        for row in sorted(rows, key=lambda r: r["at"]):
+            # Mirrors are the Social copy of a Character event, already
+            # announced (or about to be) from the Character file. The time check
+            # covers a file caught mid-write by the first pass: its rows arrive
+            # a poll late, but they predate the watcher, so they're history.
+            if (
+                row["kind"] not in ANNOUNCE
+                or row["mirror"]
+                or row["actor"] != row["owner"]
+                or datetime.fromisoformat(row["at"]) <= self._watch_from
+            ):
+                continue
+            message = {k: row[k] for k in COLUMNS if k not in ("id", "at", "detail")}
+            # The relay stamps its own `at` over a message's, so the Ledger
+            # time travels as happened_at -- as died_at does for deaths.
+            await self._broadcast(
+                {"type": "ledger", **message, "happened_at": row["at"], "text": _describe(row)}
+            )
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
