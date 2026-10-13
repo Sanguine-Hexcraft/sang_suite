@@ -5,14 +5,16 @@ import time
 from collections import deque
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import simpleobsws
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from ledger import LedgerIngester
 from mnm import DeathWatcher
 from twitch import TwitchAlerts
 
@@ -274,8 +276,13 @@ async def lifespan(app: FastAPI):
         death_watcher.start()
     except Exception as exc:
         print(f"[deaths] Startup failed, counter disabled: {exc}")
+    try:
+        ledger_ingester.start()
+    except Exception as exc:
+        print(f"[ledger] Startup failed, ingester disabled: {exc}")
     yield
     await death_watcher.stop()
+    await ledger_ingester.stop()
     # Cancel the refresh if we're shutting down before it finished, so it can't
     # run against an OBS connection we're about to close.
     task = getattr(app.state, "refresh_task", None)
@@ -438,6 +445,7 @@ def _reward_lookup(reward_id: str) -> RewardConfig | None:
 
 twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 death_watcher = DeathWatcher(manager.broadcast)
+ledger_ingester = LedgerIngester()
 
 
 @app.get("/api/health")
@@ -594,6 +602,18 @@ async def adjust_deaths(req: NudgeRequest):
     snapshot = death_watcher.nudge(req.delta)
     await manager.broadcast({"type": "deaths", **snapshot})
     return snapshot
+
+
+# --- M&M Ledger ---------------------------------------------------------------
+@app.get("/api/ledger/summary")
+async def ledger_summary(since: datetime | None = None, owner: str | None = None):
+    """Stats from `since` on -- by default, since the death counter's stream began."""
+    return ledger_ingester.summary(since or death_watcher.session_start, owner)
+
+
+@app.get("/api/ledger/recent")
+async def ledger_recent(limit: int = Query(50, ge=1, le=500), kind: str | None = None):
+    return ledger_ingester.recent(limit, kind)
 
 
 @app.websocket("/ws")

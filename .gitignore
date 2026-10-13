@@ -68,3 +68,8 @@ backend/activity.json
 # Death counter session (Phase 14): when this stream started plus manual
 # corrections. Machine-local state; the count itself comes from the M&M Ledger.
 backend/deaths.json
+
+# M&M Ledger history (ledger.py): every event ever ingested. Rebuilt from the
+# game's files if deleted -- except for anything the game has since pruned.
+backend/ledger.db
+backend/ledger.db-journal
