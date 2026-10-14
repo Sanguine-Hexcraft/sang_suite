@@ -20,7 +20,13 @@ scenes from the same dashboard. Everything runs locally — no cloud service, no
 - **Death counter** — a corner overlay counting this stream's Monsters & Memories deaths, read live
   from the game's own event journal (the Ledger). Underdark-grimoire styling: a Lolth spider sigil in a
   ring of runes, a candle-lit blackletter count, and a bell on every death.
-- **Panic button** — one click clears every queue and blanks both overlays.
+- **Level-up alerts** — your Monsters & Memories level-ups pop on the alert overlay like any Twitch
+  event, read from the same Ledger.
+- **Zone banner** — a grimoire-styled lower-third that names each M&M zone as you enter it, with an
+  optional line of lore you write yourself in `backend/zones.json`.
+- **Ledger history** — every M&M Ledger event (loot, coin, harvests, trades, level-ups, party
+  members) kept in SQLite and queryable, the raw material for recaps.
+- **Panic button** — one click clears every queue and blanks every overlay.
 - **Reliable delivery** — every event carries a sequence id and the last 50 are replayed to an overlay
   that reconnects, so an alert landing during a blip isn't lost.
 - **Live status** — the control panel shows backend health and WebSocket connection state at a glance.
@@ -124,6 +130,13 @@ The death counter is a corner widget, not a full-canvas page: add
 dashboard's Death Counter card when you go live. A session older than 6 hours is also replaced
 automatically when the backend starts.
 
+The zone banner is a lower-third: add `http://localhost:8000/overlay/zone` at **1920×300** and pin it
+to the bottom edge of the canvas. Names and lore lines live in `backend/zones.json`; press **Test
+Zone** on the dashboard to preview the zone you're standing in.
+
+**[`learning/overlays.md`](learning/overlays.md) is the full guide** — every overlay, what fires it,
+how to set it up in OBS and tune it, and what to check when one stays blank.
+
 ## Routes
 
 | Route | Purpose |
@@ -132,8 +145,9 @@ automatically when the backend starts.
 | `/overlay/alert` | Transparent alert overlay for an OBS browser source |
 | `/overlay/media` | Clip and gif overlay — its own browser source |
 | `/overlay/deaths` | M&M death counter — a small corner widget |
+| `/overlay/zone` | M&M zone banner — a lower-third |
 
-The two overlays are separate pages on purpose. Sharing one would mean a video and a follow alert
+The overlays are separate pages on purpose. Sharing one would mean a video and a follow alert
 fighting over a single DOM and a single audio context; as separate browser sources they compose and
 layer independently in OBS.
 
@@ -153,11 +167,16 @@ layer independently in OBS.
 | `GET` | `/api/deaths` | — | This stream's death count, session start, last death |
 | `POST` | `/api/deaths/reset` | — | New stream: count from now |
 | `POST` | `/api/deaths/adjust` | `{"delta": -1}` | Manual correction (±10 max per call) |
+| `GET` | `/api/ledger/summary?since=&owner=` | — | M&M stats since `since` (default: New Stream) — loot, coin, mobs, harvests, zones, level-ups, party |
+| `GET` | `/api/ledger/recent?kind=&limit=` | — | Latest Ledger events, optionally of one kind (`limit` 1–500) |
+| `GET` | `/api/zone` | — | The M&M zone you're in, with its display name and lore |
 | `WS` | `/ws` | — | Event relay; messages are broadcast to all connected clients |
 
 Alert messages are plain JSON: `{ "type": "alert", "text": "New Follower: Innoruuk" }`
 
-Twitch alerts add `kind` (`follow`/`sub`/`resub`/`cheer`/`raid`/`redeem`), `user` and `amount`. The
+Twitch alerts add `kind` (`follow`/`sub`/`resub`/`cheer`/`raid`/`redeem`), `user` and `amount`. M&M
+level-ups use the same shape with `kind: "level_up"`, the character as `user` and the new level as
+`amount`. The
 overlay looks `kind` up in the config to pick a headline and accent colour; manual alerts have no
 `kind` and use the `generic` entry.
 
@@ -168,6 +187,9 @@ Deaths come from the backend, not the dashboard:
 `{ "type": "death", "count": 7, "character": "...", "zone": "Blindmidden", "text": "... died in Blindmidden" }`.
 `count` is the absolute total for the stream, so a replayed message can't make the overlay drift. A reset or
 manual correction is pushed as `{ "type": "deaths", ...state }` and, like `config`, is not replayed.
+
+Zone changes come from the backend too, read only by `/overlay/zone`:
+`{ "type": "zone", "zone": "nightharbore", "name": "Night Harbor East", "lore": "...", "text": "Entered Night Harbor East" }`.
 
 ### Delivery guarantees
 
@@ -253,11 +275,15 @@ backend/
   twitch.py          # EventSub client — follows, subs, resubs, cheers, raids, redeems
   chat.py            # bot chat sending (stub; Phase 12)
   mnm.py             # M&M Ledger watcher for the death counter (Phase 14)
+  ledger.py          # M&M Ledger ingester: every event into SQLite, level-up alerts, stats API
+  zones.py           # M&M Player.log watcher for the zone banner
+  zones.json         # zone display names and lore lines -- edit freely, re-read live
   requirements.txt   # pinned deps
   .env.example       # config template
   config.json        # widget settings + reward routing, written by /control (gitignored)
   activity.json      # last 20 events, for the dashboard feed (gitignored)
   deaths.json        # death counter session start + manual corrections (gitignored)
+  ledger.db          # every M&M Ledger event ever seen (gitignored)
   media/             # clips and gifs, served at /media (gitignored)
 frontend/
   src/
@@ -266,6 +292,7 @@ frontend/
       AlertOverlay.vue   # /overlay/alert
       MediaOverlay.vue   # /overlay/media
       DeathOverlay.vue   # /overlay/deaths
+      ZoneOverlay.vue    # /overlay/zone
     stores/overlay.ts    # Pinia store wrapping the WebSocket
     audio/sounds.ts      # synthesised per-kind jingles
     router/index.ts      # route declarations
@@ -275,6 +302,7 @@ notes/
   obs-overlay-roadmap-part-2.md  # phases 9–13
 learning/
   how-it-works.md    # a walkthrough of the whole system
+  overlays.md        # guide to every overlay: what fires it, OBS setup, tuning
 ```
 
 ## Development
@@ -330,6 +358,8 @@ and [part 2](notes/obs-overlay-roadmap-part-2.md).
 - [x] **Phase 9** — sequence ids and replay, so a reconnect blip can't swallow an event
 - [x] **Phase 10** — channel point redeems, routed per reward
 - [x] **Phase 11** — the media overlay, queueing and the panic button
+- [x] **Phase 14** — the M&M death counter, read from the game's Ledger
+- [x] **M&M, continued** — Ledger history in SQLite, level-up alerts, the zone banner
 - [ ] **Phase 12** — the bot speaks (needs a second OAuth token as the bot account)
 - [ ] **Phase 13** — loot boxes
 
