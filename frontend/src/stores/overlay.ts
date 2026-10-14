@@ -45,6 +45,17 @@ export interface DeathEvent extends OverlayEvent {
   test?: boolean
 }
 
+// A Monsters & Memories zone-in, from backend/zones.py watching Player.log.
+// `zone` is the game's internal name ("nightharbore"); `name` and `lore` come
+// from backend/zones.json, lore empty until you write one.
+export interface ZoneEvent extends OverlayEvent {
+  type: 'zone'
+  zone: string
+  name: string
+  lore: string
+  test?: boolean
+}
+
 export interface DeathInfo {
   at: string
   character: string

@@ -1,0 +1,16 @@
+{
+  "ailvorith": { "name": "Ailvorith", "lore": "" },
+  "ancientcrypt": { "name": "Ancient Crypt", "lore": "" },
+  "blindmidden": { "name": "Blindmidden", "lore": "" },
+  "deepdunes": { "name": "Deep Dunes", "lore": "" },
+  "greatcavernsea": { "name": "Great Cavern Sea", "lore": "" },
+  "minicrypt": { "name": "", "lore": "" },
+  "nightharbor": { "name": "Night Harbor", "lore": "" },
+  "nightharbore": { "name": "Night Harbor East", "lore": "" },
+  "nightharborw": { "name": "Night Harbor West", "lore": "" },
+  "shadeddunes": { "name": "Shaded Dunes", "lore": "" },
+  "sungreetstrand": { "name": "Sungreet Strand", "lore": "" },
+  "telekir": { "name": "Tel Ekir", "lore": "" },
+  "underdocks": { "name": "The Underdocks", "lore": "" },
+  "wyrmsbanetomb": { "name": "Wyrmsbane Tomb", "lore": "" }
+}

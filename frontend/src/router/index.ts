@@ -3,6 +3,7 @@ import ControlView from '../views/ControlView.vue'
 import AlertOverlay from '../views/AlertOverlay.vue'
 import MediaOverlay from '../views/MediaOverlay.vue'
 import DeathOverlay from '../views/DeathOverlay.vue'
+import ZoneOverlay from '../views/ZoneOverlay.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -15,6 +16,8 @@ const router = createRouter({
     // Monsters & Memories death counter (Phase 14): a corner widget, so its
     // own source sized to the plaque rather than a full-canvas page.
     { path: '/overlay/deaths', component: DeathOverlay },
+    // M&M zone banner: a lower-third, its own source pinned to the bottom.
+    { path: '/overlay/zone', component: ZoneOverlay },
   ],
 })
 

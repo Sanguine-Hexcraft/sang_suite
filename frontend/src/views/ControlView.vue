@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
-import { useOverlayStore, type AppConfig, type DeathEvent } from '@/stores/overlay'
+import { useOverlayStore, type AppConfig, type DeathEvent, type ZoneEvent } from '@/stores/overlay'
 import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
 // store: the shared Pinia store instance. useOverlayStore is
@@ -243,6 +243,21 @@ function testDeath() {
   store.send(event)
 }
 
+// The zone banner's preview. Uses where you really are, when the backend
+// knows, so it doubles as a check on that zone's name and lore line.
+async function testZone() {
+  let zone = { zone: 'underdark', name: 'The Underdark', lore: 'A test of the zone banner.' }
+  try {
+    const res = await fetch('/api/zone')
+    const here = res.ok ? await res.json() : null
+    if (here?.zone) zone = { zone: here.zone, name: here.name, lore: here.lore }
+  } catch {
+    // No backend: the stand-in will do.
+  }
+  const event: ZoneEvent = { type: 'zone', test: true, ...zone, text: `Test zone: ${zone.name}` }
+  store.send(event)
+}
+
 function sinceTime(iso?: string) {
   return iso ? clockTime(Date.parse(iso)) : '—'
 }
@@ -366,8 +381,10 @@ function accentFor(kind?: string) {
           <button class="icon" title="One fewer" @click="deathCall('/api/deaths/adjust', { delta: -1 })">−1</button>
           <button class="icon" title="One more" @click="deathCall('/api/deaths/adjust', { delta: 1 })">+1</button>
           <button @click="testDeath">Test Death</button>
+          <button @click="testZone">Test Zone</button>
         </div>
         <p class="status">{{ deathStatus || 'OBS source: localhost:8000/overlay/deaths (420 × 180)' }}</p>
+        <p class="status">Zone banner: localhost:8000/overlay/zone (1920 × 300, bottom)</p>
       </section>
 
       <section class="card wide" v-if="draft">

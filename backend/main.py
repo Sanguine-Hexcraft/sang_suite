@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ledger import LedgerIngester
 from mnm import DeathWatcher
 from twitch import TwitchAlerts
+from zones import ZoneWatcher
 
 
 # --- config -----------------------------------------------------------------
@@ -283,9 +284,14 @@ async def lifespan(app: FastAPI):
         ledger_ingester.start()
     except Exception as exc:
         print(f"[ledger] Startup failed, ingester disabled: {exc}")
+    try:
+        zone_watcher.start()
+    except Exception as exc:
+        print(f"[zones] Startup failed, zone banner disabled: {exc}")
     yield
     await death_watcher.stop()
     await ledger_ingester.stop()
+    await zone_watcher.stop()
     # Cancel the refresh if we're shutting down before it finished, so it can't
     # run against an OBS connection we're about to close.
     task = getattr(app.state, "refresh_task", None)
@@ -449,6 +455,7 @@ def _reward_lookup(reward_id: str) -> RewardConfig | None:
 twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 death_watcher = DeathWatcher(manager.broadcast)
 ledger_ingester = LedgerIngester(manager.broadcast)
+zone_watcher = ZoneWatcher(manager.broadcast)
 
 
 @app.get("/api/health")
@@ -617,6 +624,12 @@ async def ledger_summary(since: datetime | None = None, owner: str | None = None
 @app.get("/api/ledger/recent")
 async def ledger_recent(limit: int = Query(50, ge=1, le=500), kind: str | None = None):
     return ledger_ingester.recent(limit, kind)
+
+
+@app.get("/api/zone")
+async def get_zone():
+    """Where you are now, as of the last zone-in Player.log recorded."""
+    return zone_watcher.snapshot()
 
 
 @app.websocket("/ws")
