@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
-import { useOverlayStore, type AppConfig, type DeathEvent, type ZoneEvent } from '@/stores/overlay'
+import { useOverlayStore, type AppConfig, type DeathEvent, type MediaEvent, type ZoneEvent } from '@/stores/overlay'
 import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
 // store: the shared Pinia store instance. useOverlayStore is
@@ -31,7 +31,12 @@ let healthTimer: ReturnType<typeof setInterval> | undefined
 onMounted(async () => {
   store.connect() // open (or reuse) the WebSocket
   checkHealth()
-  healthTimer = setInterval(checkHealth, 10_000)
+  void loadMnm()
+  void loadMedia()
+  healthTimer = setInterval(() => {
+    checkHealth()
+    void loadMnm()
+  }, 10_000)
   // Fire and forget: OBS may not be running, and that must not hold up the
   // rest of the dashboard loading.
   void loadScenes()
@@ -243,18 +248,110 @@ function testDeath() {
   store.send(event)
 }
 
+// --- M&M watchers ---------------------------------------------------------
+// A Test button only proves an overlay can draw. These answer the other half
+// of "is it working?": is the backend actually reading the game? Zone comes
+// from Player.log, the last Ledger event from SQLite -- if either looks stale
+// while you're playing, the watcher is the problem, not the overlay.
+interface ZoneState {
+  zone: string | null
+  name: string | null
+  lore: string
+  watching: string | null // Player.log's path, or null if M&M wasn't found
+}
+interface LedgerRow {
+  at: string
+  actor: string
+  kind: string
+  item?: string | null
+  mob?: string | null
+}
+const zoneState = ref<ZoneState | null>(null)
+const lastLedger = ref<LedgerRow | null>(null)
+
+async function loadMnm() {
+  try {
+    const [zone, recent] = await Promise.all([
+      fetch('/api/zone'),
+      fetch('/api/ledger/recent?limit=1'),
+    ])
+    if (zone.ok) zoneState.value = await zone.json()
+    if (recent.ok) lastLedger.value = (await recent.json())[0] ?? null
+  } catch {
+    // Backend down: the API pill already says so.
+  }
+}
+
+// The last *real* banner the relay sent. The feed already holds it (restored
+// from activity.json on load), so nothing new needs storing. Test zones are
+// skipped: they'd make the watcher look alive when it isn't.
+const lastBanner = computed(() =>
+  store.recentEvents.find((e) => e.type === 'zone' && !('test' in e && e.test)),
+)
+
+// A live zone-in updates the card at once rather than on the next poll.
+watch(
+  () => store.lastEvent,
+  (event) => {
+    if (event?.type !== 'zone' || (event as ZoneEvent).test || !zoneState.value) return
+    const { zone, name, lore } = event as ZoneEvent
+    zoneState.value = { ...zoneState.value, zone, name, lore }
+  },
+)
+
 // The zone banner's preview. Uses where you really are, when the backend
 // knows, so it doubles as a check on that zone's name and lore line.
 async function testZone() {
-  let zone = { zone: 'underdark', name: 'The Underdark', lore: 'A test of the zone banner.' }
-  try {
-    const res = await fetch('/api/zone')
-    const here = res.ok ? await res.json() : null
-    if (here?.zone) zone = { zone: here.zone, name: here.name, lore: here.lore }
-  } catch {
-    // No backend: the stand-in will do.
-  }
+  await loadMnm()
+  const here = zoneState.value
+  const zone = here?.zone
+    ? { zone: here.zone, name: here.name ?? here.zone, lore: here.lore }
+    : { zone: 'underdark', name: 'The Underdark', lore: 'A test of the zone banner.' }
   const event: ZoneEvent = { type: 'zone', test: true, ...zone, text: `Test zone: ${zone.name}` }
+  store.send(event)
+}
+
+// The shape ledger.py sends for a real level-up -- user and the new level in
+// `amount` -- so this tests the overlay's handling of that, not just the
+// level_up kind's colour and sound (the kind button above does only that).
+function testLevelUp() {
+  store.send({
+    type: 'alert',
+    kind: 'level_up',
+    user: 'Sanguine',
+    amount: 22,
+    text: 'Sanguine reached level 22',
+  })
+}
+
+// --- clip tester ------------------------------------------------------------
+// Sends exactly what twitch.py sends for a media redeem, minus Twitch. Lists
+// files on disk, not routed rewards, so a clip can be checked in OBS (codec,
+// volume, framing) before a reward ever points at it.
+const mediaFiles = ref<string[]>([])
+const mediaPick = ref('')
+
+async function loadMedia() {
+  try {
+    const res = await fetch('/api/media')
+    if (!res.ok) return
+    mediaFiles.value = (await res.json()).files
+    if (!mediaFiles.value.includes(mediaPick.value)) mediaPick.value = mediaFiles.value[0] ?? ''
+  } catch {
+    // No backend; the dropdown stays empty.
+  }
+}
+
+function testMedia(interrupt: boolean) {
+  if (!mediaPick.value) return
+  const event: MediaEvent = {
+    type: 'media',
+    src: `/media/${mediaPick.value}`,
+    title: mediaPick.value,
+    user: 'Test',
+    interrupt,
+    text: `Test clip: ${mediaPick.value}`,
+  }
   store.send(event)
 }
 
@@ -381,10 +478,63 @@ function accentFor(kind?: string) {
           <button class="icon" title="One fewer" @click="deathCall('/api/deaths/adjust', { delta: -1 })">−1</button>
           <button class="icon" title="One more" @click="deathCall('/api/deaths/adjust', { delta: 1 })">+1</button>
           <button @click="testDeath">Test Death</button>
-          <button @click="testZone">Test Zone</button>
         </div>
         <p class="status">{{ deathStatus || 'OBS source: localhost:8000/overlay/deaths (420 × 180)' }}</p>
+      </section>
+
+      <section class="card">
+        <h2>
+          Monsters &amp; Memories
+          <span class="status inline">{{ zoneState && !zoneState.watching ? 'Player.log not found' : '' }}</span>
+        </h2>
+        <!-- Status first, buttons second: if "In" is right and "Last banner"
+             matches your last zone, the backend fired and any missing banner
+             is OBS's side (source URL, visibility, a stale page). -->
+        <dl class="facts">
+          <dt>In</dt>
+          <dd>{{ zoneState?.name ?? '—' }}</dd>
+          <dt>Last banner</dt>
+          <dd>
+            <template v-if="lastBanner">{{ clockTime(lastBanner.at) }} · {{ lastBanner.text }}</template>
+            <template v-else>none in the feed</template>
+          </dd>
+          <dt>Ledger</dt>
+          <dd>
+            <template v-if="lastLedger">
+              {{ sinceTime(lastLedger.at) }} · {{ lastLedger.actor }}: {{ lastLedger.kind }}
+              {{ lastLedger.item ?? '' }}
+            </template>
+            <template v-else>no events yet</template>
+          </dd>
+        </dl>
+        <div class="row">
+          <button class="primary" @click="testZone">Test Zone</button>
+          <button @click="testLevelUp">Test Level Up</button>
+          <button class="icon" title="Refresh" @click="loadMnm">⟳</button>
+        </div>
         <p class="status">Zone banner: localhost:8000/overlay/zone (1920 × 300, bottom)</p>
+      </section>
+
+      <section class="card">
+        <h2>
+          Test Clips
+          <span class="status inline">{{ mediaFiles.length }} file(s)</span>
+        </h2>
+        <label class="field">
+          <span>Clip</span>
+          <select v-model="mediaPick" :disabled="!mediaFiles.length">
+            <option v-if="!mediaFiles.length" value="">— nothing in backend/media —</option>
+            <option v-for="f in mediaFiles" :key="f" :value="f">{{ f }}</option>
+          </select>
+        </label>
+        <div class="row">
+          <button class="primary" :disabled="!mediaPick" @click="testMedia(false)">Queue</button>
+          <!-- Interrupt cuts off whatever is playing, as an interrupt reward
+               would; Queue waits its turn. -->
+          <button :disabled="!mediaPick" @click="testMedia(true)">Interrupt</button>
+          <button class="icon" title="Rescan backend/media" @click="loadMedia">⟳</button>
+        </div>
+        <p class="status">Media overlay: localhost:8000/overlay/media</p>
       </section>
 
       <section class="card wide" v-if="draft">
@@ -551,6 +701,23 @@ function accentFor(kind?: string) {
   letter-spacing: 0.25em;
   color: var(--dim);
   text-transform: uppercase;
+}
+
+/* Label/value pairs for the watcher status: a two-column grid keeps the
+   values lined up without a table. */
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+.facts dt {
+  color: var(--dim);
+}
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .field {

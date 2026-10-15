@@ -660,6 +660,22 @@ async def websocket_endpoint(ws: WebSocket):
 # after it, so this has to come first or /media/... would return index.html.
 MEDIA = Path(__file__).parent / "media"
 
+@app.get("/api/media")
+async def list_media():
+    """Every clip and gif on disk, as paths relative to media/ -- the same form
+    a reward's `media` field takes. Feeds the dashboard's clip tester, which
+    lists files rather than routed rewards so a new clip can be checked in OBS
+    before any reward points at it."""
+    if not MEDIA.is_dir():
+        return {"files": []}
+    files = sorted(
+        p.relative_to(MEDIA).as_posix()
+        for p in MEDIA.rglob("*")
+        if p.is_file() and not p.name.startswith(".")
+    )
+    return {"files": files}
+
+
 if MEDIA.is_dir():
     app.mount("/media", StaticFiles(directory=MEDIA), name="media")
 else:
