@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from chat import ChatBot
 from ledger import LedgerIngester
 from mnm import DeathWatcher
 from twitch import TwitchAlerts
@@ -105,7 +106,8 @@ class RewardConfig(BaseModel):
     # Shown on the overlay. None = use the reward's own title from Twitch, so
     # the common case needs no text duplicated into config.
     label: str | None = None
-    # "alert" and "media" are understood; "chat" arrives in Phase 12. A plain
+    # "alert" and "media" are understood; "chat" can now be built on the
+    # Phase 12 bot (chat.py) but isn't routed yet. A plain
     # list so one reward can do several things at once.
     actions: list[str] = ["alert"]
     # Path under backend/media/, e.g. "videos/bait.webm". Served at /media/...
@@ -274,6 +276,12 @@ async def lifespan(app: FastAPI):
         await twitch_alerts.start()
     except Exception as exc:
         print(f"[twitch] Startup failed, alerts disabled: {exc}")
+    # After twitch_alerts, never alongside it: a first run authorizes both in
+    # the browser, and each auth briefly listens on the same redirect port.
+    try:
+        await chat_bot.start()
+    except Exception as exc:
+        print(f"[chat] Startup failed, bot disabled: {exc}")
     # The death counter only reads local files, so it can't fail the way Twitch
     # can -- but it's a nice-to-have too, and gets the same guard.
     try:
@@ -298,6 +306,7 @@ async def lifespan(app: FastAPI):
     if task is not None:
         task.cancel()
     await twitch_alerts.stop()
+    await chat_bot.stop()
     await obs.disconnect()
 
 
@@ -456,6 +465,7 @@ twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
 death_watcher = DeathWatcher(manager.broadcast)
 ledger_ingester = LedgerIngester(manager.broadcast)
 zone_watcher = ZoneWatcher(manager.broadcast)
+chat_bot = ChatBot()
 
 
 @app.get("/api/health")
@@ -483,6 +493,28 @@ async def panic():
     reason.
     """
     await manager.broadcast({"type": "panic"})
+    return {"ok": True}
+
+
+# --- bot chat (Phase 12) ----------------------------------------------------
+class ChatRequest(BaseModel):
+    # Twitch's own cap on a chat message.
+    text: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/chat")
+async def send_chat(req: ChatRequest):
+    """Post a message to chat as the bot.
+
+    The status says *why* a message didn't go: 503 the bot isn't connected,
+    429 our own rate limiter refused it, 502 Twitch refused it.
+    """
+    if not chat_bot.ready:
+        raise HTTPException(status_code=503, detail="bot not connected")
+    sent, reason = await chat_bot.send(req.text)
+    if not sent:
+        status = 429 if reason == "rate limited" else 502
+        raise HTTPException(status_code=status, detail=reason)
     return {"ok": True}
 
 

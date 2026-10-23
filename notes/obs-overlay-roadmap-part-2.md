@@ -160,7 +160,7 @@ That means two identities in play, which is the real content of this phase:
 | | Broadcaster token | Bot token |
 |---|---|---|
 | Authorized as | your main account | your bot account |
-| Cached in | `.twitch_tokens.json` | `.twitch_bot_tokens.json` |
+| Cached in | `.twitch_tokens.json` | `.chat_tokens.json` |
 | Used for | reading follows, subs, bits, redeems, chat | *sending* chat messages |
 
 Give the bot its own module — `backend/chat.py`, holding its own `Twitch` instance and its own `UserAuthenticationStorageHelper` — rather than growing `twitch.py` into something that manages two users. Inject it into `main.py` the same way `broadcast` is injected today.

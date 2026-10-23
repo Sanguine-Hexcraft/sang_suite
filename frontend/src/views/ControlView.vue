@@ -208,6 +208,54 @@ async function panic() {
   setTimeout(() => (panicStatus.value = ''), 4000)
 }
 
+// --- bot chat (Phase 12) -------------------------------------------------
+// Posts as the bot account, not you. The backend's error detail already says
+// why a message didn't go (not connected / rate limited / Twitch refused it),
+// so it's shown as-is.
+const chatText = ref('')
+const chatStatus = ref('')
+
+async function postChat(text: string): Promise<string | null> {
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (res.ok) return null
+    const body = await res.json().catch(() => ({}))
+    return typeof body.detail === 'string' ? body.detail : `error: ${res.status}`
+  } catch (e) {
+    return `network error: ${e}`
+  }
+}
+
+async function sendChat() {
+  const text = chatText.value.trim()
+  if (!text) return
+  const err = await postChat(text)
+  chatStatus.value = err ?? 'sent'
+  if (!err) chatText.value = ''
+  setTimeout(() => (chatStatus.value = ''), 4000)
+}
+
+// The Phase 12 checkpoint: 30 sends against a 20-per-30s limit. Expect about
+// 20 through and the rest refused by our own limiter, with nothing erroring.
+async function chatBurst() {
+  chatStatus.value = 'bursting…'
+  let sent = 0
+  let limited = 0
+  let other = ''
+  for (let i = 1; i <= 30; i++) {
+    const err = await postChat(`burst test ${i}/30`)
+    if (err === null) sent++
+    else if (err === 'rate limited') limited++
+    else other = err
+  }
+  chatStatus.value = `${sent} sent, ${limited} rate limited${other ? `, last error: ${other}` : ''}`
+  setTimeout(() => (chatStatus.value = ''), 8000)
+}
+
 // --- death counter (Phase 14) ------------------------------------------
 // The count itself comes from the game's Ledger on the backend; these only
 // move the session's start or nudge the total. Each POST is answered with the
@@ -411,6 +459,20 @@ function accentFor(kind?: string) {
           <button v-for="name in kindNames" :key="name" @click="sendAlert(name)">
             {{ name }}
           </button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Bot Chat</h2>
+        <p class="hint">Posts to your Twitch chat as the bot account.</p>
+        <label class="field">
+          <span>Message</span>
+          <input v-model="chatText" placeholder="Hello, chat" maxlength="500" @keyup.enter="sendChat" />
+        </label>
+        <div class="row">
+          <button class="primary" @click="sendChat">Send</button>
+          <button @click="chatBurst">Burst ×30</button>
+          <span v-if="chatStatus" class="status">{{ chatStatus }}</span>
         </div>
       </section>
 
