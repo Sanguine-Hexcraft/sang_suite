@@ -18,7 +18,7 @@ Part 2 is about turning it from *working* into *something you'd trust on a live 
 Phase  9   Event delivery you can trust      DONE  ← infrastructure everything else leans on
 Phase 10   Channel point redeems             DONE  ← new event source
 Phase 11   The media overlay                 DONE  ← new output surface
-Phase 12   The bot speaks                          ← new identity
+Phase 12   The bot speaks                    DONE  ← new identity
 Phase 13   Loot boxes                              ← composition of all of the above
 ```
 
@@ -35,6 +35,34 @@ plan below, written after the fact:
   elapsed time.
 - **Interrupt-vs-queue:** the plan suggests short clips cut in. In practice losing 40s of a long clip
   to a 2s bit was the wrong trade, and every reward now queues. The field remains per-reward.
+
+**Phase 12 shipped 2026-10-23**, verified live: the bot authorized and posted to chat. What differed:
+
+- **The token file is `.chat_tokens.json`,** not `.twitch_bot_tokens.json` as planned below. The table
+  has been corrected.
+- **`user:bot` and `channel:bot` aren't needed.** Those are for sending with an *app* token. A user
+  token sending as itself needs only `user:write:chat`.
+- **Switching accounts was easy:** twitchAPI's auth helper forces Twitch's consent page, and its
+  "Not you?" link switches to the bot. Startup warns if the bot's id equals the channel's.
+- **The rate limiter drops, it doesn't queue,** and it counts attempts rather than successes, because
+  Twitch counts what it's sent. Twitch's own `drop_reason` is passed back as an error, never reported
+  as a send.
+- **Loop prevention is deferred to Phase 13.** Nothing reads chat yet, so there's nothing to loop on.
+  `ChatBot.bot_user_id` is there for that check.
+- **A `"chat"` reward action** isn't routed yet.
+
+**Security pass, same day.** Once the API could post as the bot, "no login" stopped being harmless.
+`fastapi run` listens on every interface, and this machine's firewall zone allows ports 1025–65535,
+so anyone on the same Wi-Fi could drive OBS, post to chat, or play any URL as a clip on stream.
+Worse, any web page open in your own browser could do it too: body-less POSTs need no CORS
+preflight, and websockets ignore CORS entirely. Now:
+
+- `stream.sh` binds `127.0.0.1`.
+- `TrustedHostMiddleware` blocks DNS rebinding.
+- A non-local `Origin` is refused on writes and on the `/ws` handshake.
+- `/ws` relays only an allow-list of types, and only `/media/` clip sources.
+
+No secret had ever been committed; checked against the full history before the repo went further.
 
 The order is deliberate. Each phase is worth more once the one before it exists, and Phase 13 is last precisely *because* it's the least foundational — it's the payoff, not the plumbing.
 

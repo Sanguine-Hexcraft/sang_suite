@@ -22,4 +22,7 @@ cd backend
 source venv/bin/activate
 # `run`, not `dev`: no reloader, no file watcher. exec so Ctrl-C stops the
 # server directly instead of leaving it orphaned behind this script.
-exec fastapi run main.py
+# --host: `fastapi run` otherwise listens on every interface, and nothing here
+# has a login -- anyone on the same Wi-Fi could post as the bot or drive OBS.
+# OBS reaches the overlays over localhost, so it loses nothing.
+exec fastapi run main.py --host 127.0.0.1

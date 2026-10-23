@@ -44,6 +44,13 @@ watch(
     }
     if (event?.type !== 'media') return
     const media = event as MediaEvent
+    // Only clips from our own /media mount -- this element would otherwise
+    // play any URL on the internet, on stream. The backend refuses these too;
+    // this is the second lock on the same door.
+    if (typeof media.src !== 'string' || !media.src.startsWith('/media/')) {
+      console.error('[media] refused off-site src', media.src)
+      return
+    }
     if (media.interrupt) {
       // Cut in: drop what's on screen and jump the queue rather than waiting.
       queue.unshift(media)

@@ -7,12 +7,15 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import simpleobsws
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from chat import ChatBot
 from ledger import LedgerIngester
@@ -311,6 +314,40 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+# --- local-only guards ------------------------------------------------------
+# Nothing here has a login: the API can post as the bot, flip OBS scenes and
+# put any clip on stream. stream.sh binds to 127.0.0.1 so the network can't
+# reach it, but a web page open in your own browser still can, two ways:
+#   * Cross-site requests. A page on evil.example can POST to localhost:8000
+#     (a body-less POST needs no CORS preflight) and can open a websocket to
+#     /ws (websockets ignore CORS entirely). Browsers always send Origin on
+#     both, so a non-local Origin is refused.
+#   * DNS rebinding. Re-pointing its own domain at 127.0.0.1 makes the
+#     request same-origin -- but the Host header still names that domain,
+#     which TrustedHostMiddleware refuses.
+# Requests with no Origin at all (curl, OBS's own refresh) aren't from a page,
+# so they pass.
+LOCAL_HOSTS = ["localhost", "127.0.0.1"]
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _local_origin(origin: str | None) -> bool:
+    # Any port: in dev the dashboard is Vite on :5173.
+    return origin is None or urlsplit(origin).hostname in LOCAL_HOSTS
+
+
+@app.middleware("http")
+async def refuse_cross_site(request: Request, call_next):
+    if request.method not in SAFE_METHODS and not _local_origin(request.headers.get("origin")):
+        return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+    return await call_next(request)
+
+
+# Added last so it runs first (Starlette wraps middleware outside-in). It
+# covers websockets too, which the http middleware above never sees.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=LOCAL_HOSTS)
 
 
 # --- browser <-> backend relay (Phase 4) ------------------------------------
@@ -664,8 +701,19 @@ async def get_zone():
     return zone_watcher.snapshot()
 
 
+# What a client may send for relaying. Everything the server originates
+# (config, panic, deaths, ledger, level-ups...) is deliberately absent, so a
+# client can't forge it; the dashboard only ever sends test events of these.
+RELAYABLE = {"alert", "death", "zone", "media"}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # Refused before accept(): the handshake fails, so no message is ever
+    # delivered to or from that page. 1008 = policy violation.
+    if not _local_origin(ws.headers.get("origin")):
+        await ws.close(code=1008)
+        return
     await manager.connect(ws)
     try:
         while True:
@@ -679,7 +727,15 @@ async def websocket_endpoint(ws: WebSocket):
                 if replayed:
                     print(f"[ws] replayed {replayed} missed event(s) to a client")
                 continue
-            # For now: relay everything else to everyone
+            kind = data.get("type")
+            if kind not in RELAYABLE:
+                print(f"[ws] dropped client message of type {kind!r}")
+                continue
+            # The media overlay plays whatever src it's handed, so only our
+            # own /media mount is allowed -- never an arbitrary URL.
+            if kind == "media" and not str(data.get("src", "")).startswith("/media/"):
+                print(f"[ws] dropped media message with off-site src {data.get('src')!r}")
+                continue
             await manager.broadcast(data)
     except WebSocketDisconnect:
         manager.disconnect(ws)
