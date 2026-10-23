@@ -19,7 +19,9 @@ Phase  9   Event delivery you can trust      DONE  ← infrastructure everything
 Phase 10   Channel point redeems             DONE  ← new event source
 Phase 11   The media overlay                 DONE  ← new output surface
 Phase 12   The bot speaks                    DONE  ← new identity
-Phase 13   Loot boxes                              ← composition of all of the above
+Phase 13   Song requests                           ← chat becomes an input
+Phase 14   M&M death counter                 DONE  ← (built out of order; see README)
+Phase 15   Loot boxes                              ← composition of all of the above
 ```
 
 **Phases 9–11 shipped 2026-09-15 and the project was tagged v1.0.** Notes on what differed from the
@@ -47,7 +49,7 @@ plan below, written after the fact:
 - **The rate limiter drops, it doesn't queue,** and it counts attempts rather than successes, because
   Twitch counts what it's sent. Twitch's own `drop_reason` is passed back as an error, never reported
   as a send.
-- **Loop prevention is deferred to Phase 13.** Nothing reads chat yet, so there's nothing to loop on.
+- **Loop prevention is deferred to Phase 13** (song requests), the first phase that reads chat. Until then there's nothing to loop on.
   `ChatBot.bot_user_id` is there for that check.
 - **A `"chat"` reward action** isn't routed yet.
 
@@ -64,9 +66,9 @@ preflight, and websockets ignore CORS entirely. Now:
 
 No secret had ever been committed; checked against the full history before the repo went further.
 
-The order is deliberate. Each phase is worth more once the one before it exists, and Phase 13 is last precisely *because* it's the least foundational — it's the payoff, not the plumbing.
+The order is deliberate. Each phase is worth more once the one before it exists, and loot boxes (Phase 15) are last precisely *because* they're the least foundational — they're the payoff, not the plumbing.
 
-**One cross-cutting constraint, read this before Phase 10:** every change to the OAuth scope list invalidates the cached token in `backend/.twitch_tokens.json` and forces a browser re-authorize. Phase 10 needs `CHANNEL_READ_REDEMPTIONS` and Phase 13 needs `USER_READ_CHAT`. **Add both at once in Phase 10**, even though you won't use the second for weeks. One re-auth instead of two.
+**One cross-cutting constraint, read this before Phase 10:** every change to the OAuth scope list invalidates the cached token in `backend/.twitch_tokens.json` and forces a browser re-authorize. Phase 10 needs `CHANNEL_READ_REDEMPTIONS`, and Phases 13 and 15 need `USER_READ_CHAT`. **Add both at once in Phase 10**, even though you won't use the second for weeks. One re-auth instead of two.
 
 ---
 
@@ -201,22 +203,134 @@ Two things to build in from the start: **rate limiting** (20 messages per 30 sec
 
 ---
 
-## Phase 13 — Loot boxes (2–3 evenings)
+## Phase 13 — Song requests (3–4 evenings)
+
+A viewer types `!sr <youtube link>` in chat. The bot confirms with the title and the viewer's queue position. The song plays on stream in its own OBS browser source, with a "now playing" card. Mods can `!skip`, and you run the queue from `/control`.
+
+This is the first phase where **chat becomes an input**, and it's the real content of the phase. Until now every input was either you (the dashboard), Twitch on a viewer's behalf (follows, subs, redeems) or the game. A chat message is arbitrary text from anyone, so everything below is built around never trusting it.
+
+### Read this first: copyright
+
+Twitch's music rules apply to *your* channel, whoever requested the song. Copyrighted music playing live can get the stream muted or earn you a DMCA strike. It also mutes the VOD and every clip made from it. A song-request feature with an open YouTube search box is the classic way streamers collect strikes. Mitigations, and none of them is a guarantee:
+
+- **Route the song source off the VOD track.** In OBS: Settings → Output → Advanced, then the Twitch VOD Track. Viewers still hear songs live, but the archive stays clean. Check that it really excludes the source with a test VOD.
+- **Have an allowlist mode from the start.** A `songs.allow_channels` list (NCS, Monstercat Uncaged, StreamBeats, your own uploads) that you can switch on in one click, if this ever bites.
+- **The off switch is a dashboard toggle, not a code change.**
+
+### 13a — The queue, with no Twitch involved
+
+Same trick as loot boxes: a `POST /api/songs/request {url, user}` test endpoint runs the identical code path `!sr` will, so the whole feature is testable from the dashboard first.
+
+New module `backend/songs.py`, holding `SongQueue`. Its dependencies are injected (`broadcast`, the lookup, later the bot's `send`), the way `twitch.py` is.
+
+**The queue lives on the backend, unlike the alert queue.** The alert queue is a display concern, so it lives in the overlay. A song queue has several readers and writers: `!queue` in chat, Skip in `/control`, the overlay reporting a song ended. That needs one authoritative copy. Persist it to a gitignored `backend/songs.json`, so a restart mid-stream doesn't throw away twenty requests. The *playback position* isn't persisted; a restarted song starts from the top.
+
+**The URL never leaves the backend; only an 11-character video id does.** Pull the id out with one regex over the link shapes people actually paste:
+- `youtube.com/watch?v=`
+- `youtu.be/`
+- `/shorts/`
+- `music.youtube.com`
+- `m.youtube.com`
+
+An 11-character `[A-Za-z0-9_-]` id is also accepted on its own. Reject anything else. The overlay builds the embed itself from the id. That way the security pass's rule ("the media overlay only plays `/media/`") has a twin here: the song overlay only ever loads `youtube.com/embed/<id>`, and a crafted message can't point it anywhere else.
+
+**Look up every request before queueing it**, using the YouTube Data API v3. `videos.list?part=snippet,contentDetails,status&id=<id>` costs 1 quota unit out of a free 10,000 a day. One call answers every question the queue needs:
+
+| Field | Used for |
+|---|---|
+| `snippet.title`, `snippet.channelTitle` | the bot's reply, the now-playing card, the channel allowlist |
+| `contentDetails.duration` (ISO 8601, `PT4M13S`) | the length cap |
+| `status.embeddable` | refuse up front instead of failing on stream |
+| `snippet.liveBroadcastContent` | refuse live streams, which never end |
+
+The API key goes in `.env` as `YOUTUBE_API_KEY`. It's a plain key, not OAuth, so no third browser authorization is needed. Text search (`!sr never gonna give you up`) is `search.list` at **100 units**, so roughly 100 searches a day. Leave it out of the first version; links only.
+
+**Knobs in `config.json`** as a `SongConfig` model:
+- `enabled`, flipped from the dashboard and announced in chat when it changes;
+- `max_duration_s` (6 minutes is a sane default);
+- `max_queue`;
+- `per_user_limit` (one song in the queue per viewer);
+- `who`: everyone / subs / VIPs and mods;
+- `blocklist`, a list of video ids and channel ids.
+
+**Checkpoint:** from `/control`, request a normal song, a 40-minute video, an embedding-disabled video and garbage text. The first queues, the other three are refused with a reason, and the queue survives a backend restart.
+
+### 13b — The player overlay
+
+A new page, `/overlay/song`, as its own OBS browser source, for the same reason media has its own: separate DOM, separate audio. Tick "Control audio via OBS" so it gets its own mixer fader.
+
+Use the **YouTube IFrame Player API** (`https://www.youtube.com/iframe_api`, then `new YT.Player(...)`), not a bare `<iframe>`. You need its events:
+- `onStateChange` with `YT.PlayerState.ENDED` → the song finished;
+- `onError` → skip it. Code `2` is a bad id, `5` is a player error, `100` means removed or private, and `101`/`150` mean the owner disabled embedding. **Expect 150 constantly**: label-owned music videos often block embedding even when `status.embeddable` said yes, or the restriction only applies in some regions.
+
+**The overlay reports back; the backend decides what's next.** On `ENDED` or `onError`, the overlay calls `POST /api/songs/ended {request_id}` (same origin, so the Origin guard is happy). The backend advances the queue and broadcasts the new `type: "song"` state. Carry the `request_id` and ignore stale ones. Otherwise two copies of the overlay open at once, say OBS and a browser tab, would each report the end, and the queue would skip a song.
+
+**Apply the media lesson.** No fixed timeout on playback: a 30-second cap cut a 75-second clip in half in Phase 11, and it would do the same to every song. The stall check must measure *lack of progress*, polling `getCurrentTime()` every few seconds, and skip only when it stops advancing while the player state still says playing.
+
+**On a reconnect, ask for the state instead of trusting replay.** Like the zone banner, the song overlay ignores `replay: true` messages. On connect it calls `GET /api/songs/now` and resumes that song, so a refreshed browser source doesn't replay a backlog of "now playing" messages.
+
+The **now-playing card** goes on the same page, so it can never disagree with what's audible. It shows the title, the channel and "requested by <name>", rendered through Vue interpolation as usual. Titles are viewer-chosen text; never `v-html` them.
+
+**Test YouTube in OBS specifically, not just in a browser.** The CEF codec trap from Phase 11 applies. YouTube normally serves VP9/Opus to a browser without H.264, which should be fine, but prove it in the browser source with sound before trusting it. Some embeds also refuse to play without a referrer or origin; pass `origin: 'http://localhost:8000'` in `playerVars`.
+
+**Checkpoint:** two queued songs play back to back in OBS with audio. Skip from `/control` cuts to the next one. An embed-blocked video is skipped within a second or two. Panic stops music too.
+
+### 13c — Reading chat
+
+`channel.chat.message` via `listen_channel_chat_message(broadcaster_id, user_id, callback)` in `twitch.py`. Pass your id for both. It uses the broadcaster token and `user:read:chat`, **which Phase 10's scope batch already granted, so there's no re-authorize**. That's what the batching was for.
+
+Keep `twitch.py` ignorant of songs. Inject a single `on_chat` callback the way `broadcast` is injected, and have `main.py` dispatch commands to handlers. Loot boxes (Phase 15) become another subscriber to the same dispatcher, not a second chat subscription.
+
+**Loop prevention lives here**, the item Phase 12 deferred. Drop any message whose `chatter_user_id` is the bot's (`chat_bot.bot_user_id`). Also drop anything from a lowercased bot denylist (Nightbot, StreamElements, Moobot, ...), before any command parsing. Key everything on `chatter_user_id`, never the display name.
+
+**Permissions come from the event's `badges`** (`broadcaster`, `moderator`, `vip`, `subscriber`), not from extra Helix lookups. Commands:
+- **`!sr <link>`** for everyone, or whatever `who` allows;
+- **`!song`**: what's playing;
+- **`!queue`**: the next few songs and your own position;
+- **`!wrongsong`**: remove your own most recent request;
+- **`!skip`**: mods and broadcaster only.
+
+**Replies thread** with `reply_parent_message_id`, the event's `message_id`. That needs one optional parameter added to `ChatBot.send`.
+
+**Mind the bot's rate limit.** Twenty replies per 30 seconds sounds generous until a chat of 40 people spams `!sr` at once. When the limiter drops a reply, the request must still queue; a missing confirmation is cosmetic, a missing song isn't. Bot messages also pass through AutoMod and the channel's settings. A title with a blocked term comes back as a `drop_reason`, which `ChatBot.send` already reports.
+
+**Respect mod deletions:** `listen_channel_chat_message_delete` fires when a mod removes a message. If that message was an `!sr`, pull the request. That's cheap, and it's what mods will assume happens.
+
+**Checkpoint:**
+- `!sr <link>` from a second account queues, gets a threaded bot reply, and plays.
+- `!sr` from the bot's own account is ignored.
+- A non-mod `!skip` does nothing; a mod `!skip` works.
+- A mod deleting an `!sr` message removes that request.
+- Thirty rapid `!sr`s from different accounts all queue (up to `max_queue`), even though some replies get rate-limited.
+
+### 13d — The dashboard
+
+A Song Requests card in `/control`. Requests open/closed toggle, the now-playing song, the queue with remove buttons, skip, and a volume slider (`player.setVolume`, broadcast to the overlay; the OBS fader still sits on top). It's ordinary work at this point; nothing new is learned here, which is why it's last.
+
+---
+
+## Phase 14 — M&M death counter
+
+Built ahead of Phases 12, 13 and 15, out of order, and documented in `CLAUDE.md` and `learning/overlays.md` rather than here.
+
+---
+
+## Phase 15 — Loot boxes (2–3 evenings)
 
 The first chat message a viewer sends each stream-day rolls them a random item, announced with an alert and a chat message. Like a Megabonk loot box, but the currency is showing up.
 
-By this point the interesting parts already exist: chat events arrive (Phase 10's scope batch), the alert queue absorbs bursts (Phase 9's commit and the queue fix before it), and the bot can announce the drop (Phase 12).
+By this point the interesting parts already exist: chat is read and dispatched with loop prevention (Phase 13), the alert queue absorbs bursts (Phase 9's commit and the queue fix before it), and the bot can announce the drop (Phase 12).
 
-### 13a — The roll, with no Twitch involved
+### 15a — The roll, with no Twitch involved
 
-New module `backend/loot.py`. A `POST /api/loot/roll` test endpoint runs the identical code path a real chat message will, so the entire feature is testable from the dashboard before a single chat event is wired up. Do this first; it makes 13b a twenty-line change.
+New module `backend/loot.py`. A `POST /api/loot/roll` test endpoint runs the identical code path a real chat message will, so the entire feature is testable from the dashboard before a single chat event is wired up. Do this first; it makes 15b a twenty-line change.
 
 - **Item pool in a committed `backend/loot.json`.** It's content, not settings — hand-edited, wants to be in git, gets long. Don't put eighty items through the config PUT payload.
 - **Knobs in `config.json`** as a `LootConfig` model: enabled, reset hour, rarity weights, bot denylist.
 - **Two-stage weighted roll** — pick rarity by weight, then an item uniformly within it. Weighting items individually means retuning odds requires touching every entry, and drift becomes invisible.
 - **One `AlertKindConfig` per rarity** (`loot_common`, `loot_rare`, `loot_epic`, `loot_legendary`). Rarity → colour and jingle is exactly the mapping `kinds` already does, so a legendary sounds different from a common with no overlay code at all. Bonus: `/control` generates a test button per kind automatically.
 
-### 13b — The day gate
+### 15b — The day gate
 
 Key on **`chatter_user_id`**, never the display name — names change case and get changed outright.
 
@@ -231,9 +345,9 @@ Persist claims to a gitignored `backend/loot_state.json`. Without persistence, a
 
 Bots claim loot unless you stop them: Nightbot, StreamElements, your own bot account. A lowercased denylist handles it. Decide explicitly whether `!command` messages count — I'd say yes, a lurker typing `!lurk` earned it.
 
-### 13c — Wire the real chat event
+### 15c — Wire the real chat event
 
-`channel.chat.message` in `twitch.py`, keeping that module ignorant of loot by injecting an `on_chat` callback exactly as `broadcast` is injected. Announce the drop in chat via Phase 12.
+Phase 13 already reads `channel.chat.message` and dispatches it, with bots and the bot's own messages dropped. Loot is one more handler on that dispatcher, which sees *every* message, not just `!commands`. Announce the drop in chat via Phase 12. The Phase 13 bot denylist covers "bots claim loot", so 15b's separate denylist can just reuse it.
 
 **Checkpoint:** your first message of the day in your own chat rolls an item, shows a rarity-coloured alert in OBS, and posts to chat. Your second message does nothing. Restarting the backend doesn't let you roll again.
 

@@ -360,8 +360,9 @@ and [part 2](notes/obs-overlay-roadmap-part-2.md).
 - [x] **Phase 11** — the media overlay, queueing and the panic button
 - [x] **Phase 14** — the M&M death counter, read from the game's Ledger
 - [x] **M&M, continued** — Ledger history in SQLite, level-up alerts, the zone banner
-- [ ] **Phase 12** — the bot speaks (needs a second OAuth token as the bot account)
-- [ ] **Phase 13** — loot boxes
+- [x] **Phase 12** — the bot speaks, posting to chat as its own account
+- [ ] **Phase 13** — song requests: `!sr <youtube link>` in chat, played in its own overlay
+- [ ] **Phase 15** — loot boxes
 
 ### Known gaps
 

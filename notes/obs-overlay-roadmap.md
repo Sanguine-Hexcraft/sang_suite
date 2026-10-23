@@ -369,7 +369,7 @@ Now `fastapi run main.py` is the only process. Point OBS at `http://localhost:80
 
 ## After that (the fun list)
 
-Phases 9–13 — reliable event delivery, channel point redeems, video playback, a chat bot, and loot boxes — are planned in [`obs-overlay-roadmap-part-2.md`](obs-overlay-roadmap-part-2.md). What's left below is the long tail.
+Phases 9–15 — reliable event delivery, channel point redeems, video playback, a chat bot, song requests, the M&M death counter and loot boxes — are planned in [`obs-overlay-roadmap-part-2.md`](obs-overlay-roadmap-part-2.md). What's left below is the long tail.
 
 - More widget types: ticker, chat display, goal bars
 - Widget config UI on `/control` (this is where Pinia + persistence really pay off)
