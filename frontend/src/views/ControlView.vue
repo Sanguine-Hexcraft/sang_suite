@@ -9,6 +9,13 @@ import { playSound, SOUND_NAMES } from '@/audio/sounds'
 // component gets, so ControlView and the overlay page share one.
 const store = useOverlayStore()
 
+// --- tabs ---------------------------------------------------------------
+// Plain state rather than separate routes: the settings tab shares the draft,
+// save logic and store with everything else here. Paired with v-show (not
+// v-if) in the template, so switching tabs mid-edit keeps an unsaved draft.
+type Tab = 'live' | 'settings'
+const tab = ref<Tab>('live')
+
 // --- backend health -----------------------------------------------------
 // apiOk is a tri-state: null while the first check is in flight, then
 // true/false. A dashboard light that says "down" before it has looked is
@@ -97,7 +104,6 @@ function revertConfig() {
 
 // --- OBS control (Phase 6) ----------------------------------------------
 const obsScene = ref('')
-const obsSource = ref('')
 const obsStatus = ref('') // last result/error, shown under the buttons
 const obsOk = ref<boolean | null>(null)
 
@@ -146,10 +152,6 @@ async function loadSources() {
     const res = await fetch(`/api/obs/sources?scene=${encodeURIComponent(obsScene.value)}`)
     if (!res.ok) throw new Error((await res.json()).detail ?? res.statusText)
     obsSources.value = (await res.json()).sources
-    // The previously selected source may not exist in the newly picked scene.
-    if (!obsSources.value.some((s) => s.name === obsSource.value)) {
-      obsSource.value = obsSources.value[0]?.name ?? ''
-    }
   } catch (e) {
     obsSources.value = []
     obsStatus.value = `${e}`
@@ -160,13 +162,14 @@ async function loadSources() {
 // visibility in each -- so the list reloads whenever the scene changes.
 watch(obsScene, loadSources)
 
-// Toggling visibility makes the dots in the dropdown stale, so re-read the
-// scene afterwards rather than optimistically flipping our own copy: if OBS
-// refused the change, the list should show what OBS actually did.
-async function setSourceVisible(visible: boolean) {
+// Each checkbox is bound one-way (:checked, not v-model): the browser ticks
+// the box the moment it's clicked, but the truth lives in OBS. So re-read the
+// scene afterwards rather than trusting the click -- if OBS refused the
+// change, loadSources() puts the box back to what OBS actually did.
+async function setSourceVisible(source: string, visible: boolean) {
   await callObs('/api/obs/source', {
     scene: obsScene.value,
-    source: obsSource.value,
+    source,
     visible,
   })
   await loadSources()
@@ -423,6 +426,10 @@ function accentFor(kind?: string) {
   <main class="dash">
     <header class="topbar">
       <h1>SANG SUITE</h1>
+      <nav class="tabs">
+        <button :class="{ active: tab === 'live' }" @click="tab = 'live'">Live</button>
+        <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">Alert Settings</button>
+      </nav>
       <div class="pills">
         <span class="pill" :class="apiOk === null ? 'idle' : apiOk ? 'up' : 'down'">
           API {{ apiOk === null ? '…' : apiOk ? 'ok' : 'down' }}
@@ -436,7 +443,7 @@ function accentFor(kind?: string) {
       </div>
     </header>
 
-    <div class="grid">
+    <div v-show="tab === 'live'" class="grid">
       <section class="card panic-card">
         <h2>Panic</h2>
         <p class="hint">Clears every queue and hides both overlays immediately.</p>
@@ -490,17 +497,23 @@ function accentFor(kind?: string) {
             <option v-for="name in obsScenes" :key="name" :value="name">{{ name }}</option>
           </select>
         </label>
-        <label class="field">
-          <span>Source</span>
-          <select v-model="obsSource" :disabled="!obsSources.length">
-            <option v-if="!obsSources.length" value="">— no sources —</option>
-            <!-- The dot marks what OBS currently has visible, so Show/Hide
-                 isn't a guess. It's a snapshot from the last load, not live. -->
-            <option v-for="s in obsSources" :key="s.name" :value="s.name">
-              {{ s.visible ? '●' : '○' }} {{ s.name }}
-            </option>
-          </select>
-        </label>
+        <!-- One checkbox per source in the selected scene: ticked = visible.
+             It's a snapshot from the last load, not live -- OBS doesn't push
+             changes to us, hence the reload button below. -->
+        <fieldset class="field sources">
+          <legend>Sources</legend>
+          <p v-if="!obsSources.length" class="hint">— no sources —</p>
+          <div class="source-list">
+            <label v-for="s in obsSources" :key="s.name" class="check" :title="s.name">
+              <input
+                type="checkbox"
+                :checked="s.visible"
+                @change="setSourceVisible(s.name, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ s.name }}</span>
+            </label>
+          </div>
+        </fieldset>
         <div class="row">
           <button
             class="primary"
@@ -509,8 +522,6 @@ function accentFor(kind?: string) {
           >
             Switch Scene
           </button>
-          <button :disabled="!obsSource" @click="setSourceVisible(true)">Show</button>
-          <button :disabled="!obsSource" @click="setSourceVisible(false)">Hide</button>
           <!-- Scenes and sources change in OBS while this page is open, and
                nothing pushes that to us, so there has to be a manual reload. -->
           <button class="icon" title="Reload from OBS" @click="loadScenes">⟳</button>
@@ -599,6 +610,28 @@ function accentFor(kind?: string) {
         <p class="status">Media overlay: localhost:8000/overlay/media</p>
       </section>
 
+      <section class="card wide">
+        <h2>
+          Activity
+          <span class="status inline">{{ store.recentEvents.length }} event(s)</span>
+        </h2>
+        <p v-if="!store.recentEvents.length" class="status">
+          Nothing yet — fire a test alert or wait for Twitch.
+        </p>
+        <ul class="feed">
+          <li v-for="event in store.recentEvents" :key="event.id">
+            <span class="time">{{ clockTime(event.at) }}</span>
+            <span class="tag" :style="{ color: accentFor(event.kind), borderColor: accentFor(event.kind) }">
+              {{ event.kind || event.type }}
+            </span>
+            <span class="text">{{ event.text }}</span>
+            <span class="amount">{{ event.amount ?? '' }}</span>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <div v-show="tab === 'settings'" class="grid">
       <section class="card wide" v-if="draft">
         <h2>
           Alert Settings
@@ -638,26 +671,6 @@ function accentFor(kind?: string) {
           <button class="primary" @click="saveConfig">Save Settings</button>
           <button @click="revertConfig">Revert</button>
         </div>
-      </section>
-
-      <section class="card wide">
-        <h2>
-          Activity
-          <span class="status inline">{{ store.recentEvents.length }} event(s)</span>
-        </h2>
-        <p v-if="!store.recentEvents.length" class="status">
-          Nothing yet — fire a test alert or wait for Twitch.
-        </p>
-        <ul class="feed">
-          <li v-for="event in store.recentEvents" :key="event.id">
-            <span class="time">{{ clockTime(event.at) }}</span>
-            <span class="tag" :style="{ color: accentFor(event.kind), borderColor: accentFor(event.kind) }">
-              {{ event.kind || event.type }}
-            </span>
-            <span class="text">{{ event.text }}</span>
-            <span class="amount">{{ event.amount ?? '' }}</span>
-          </li>
-        </ul>
       </section>
     </div>
   </main>
@@ -708,6 +721,32 @@ function accentFor(kind?: string) {
 .pills {
   display: flex;
   gap: 8px;
+}
+
+/* Underline-style tabs: quieter than the card buttons, since they're
+   navigation, not actions. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--dim);
+  padding: 6px 12px;
+}
+
+.tabs button:hover {
+  color: var(--text);
+}
+
+.tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .pill {
@@ -793,6 +832,53 @@ function accentFor(kind?: string) {
 .field.grow {
   flex: 1;
   min-width: 180px;
+}
+
+/* A fieldset groups the checkboxes for screen readers, but ships with its own
+   border, padding and margin -- strip them so it lines up with the other
+   fields. The legend plays the part the <span> plays in a .field label. */
+fieldset.sources {
+  border: 0;
+  padding: 0;
+  margin: 0 0 10px;
+}
+
+fieldset.sources legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+/* Same auto-fill trick as .grid, at a smaller scale: as many 120px columns as
+   the card has room for -- two in a normal-width card, more if it's wider. */
+.source-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 4px 12px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  /* Grid items default to min-width: auto, which lets a long name push the
+     column wider instead of shrinking -- 0 lets the ellipsis below kick in. */
+  min-width: 0;
+}
+
+.check span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check input {
+  accent-color: var(--accent);
+  /* Undo the text-input padding the global `input` rule gives everything. */
+  padding: 0;
+  margin: 0;
 }
 
 .row {
@@ -932,8 +1018,9 @@ button:disabled:hover {
   list-style: none;
   padding: 0;
   margin: 0;
-  max-height: 320px;
-  overflow-y: auto;
+  /* No max-height/overflow: the feed runs down the page and uses the
+     browser's own scrollbar. It can't grow forever -- the store caps it at
+     MAX_LOG (50) entries. */
 }
 
 .feed li {
