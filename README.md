@@ -1,228 +1,310 @@
 # sang_suite
 
-A self-hosted streaming tools suite: a **FastAPI** backend plus a **Vue 3** frontend that serves both a
-control panel and transparent browser-source overlays for OBS.
+**A self-hosted streaming toolkit for Twitch and OBS.** A FastAPI backend and a Vue 3 frontend run on
+your own machine and give you:
 
-Click a button in the control panel and an alert appears on your stream. Toggle OBS sources and switch
-scenes from the same dashboard. Everything runs locally — no cloud service, no public URL.
+- a **control panel** in your browser for test alerts, OBS scenes and sources, bot chat, clips and a
+  panic button
+- a set of **transparent overlays** you add to OBS as browser sources: alerts, clips, a death counter
+  and a zone banner
+
+Twitch events such as follows, subs, cheers, raids and channel point redeems become on-stream alerts
+automatically. Monsters & Memories is read straight from the game's own files, so deaths, level-ups and
+zone changes show up on stream as they happen.
+
+Everything runs locally. There's no cloud service, no account to sign up for and no public URL.
+
+---
+
+## Contents
+
+- [Features](#features)
+- [How it fits together](#how-it-fits-together)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Adding the overlays to OBS](#adding-the-overlays-to-obs)
+- [The control panel](#the-control-panel)
+- [Alert settings and channel point rewards](#alert-settings-and-channel-point-rewards)
+- [Clips and gifs](#clips-and-gifs)
+- [Monsters & Memories integration](#monsters--memories-integration)
+- [API reference](#api-reference)
+- [WebSocket protocol](#websocket-protocol)
+- [Security model](#security-model)
+- [Project structure](#project-structure)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
+
+---
 
 ## Features
 
-- **Alert overlay** — a transparent page you drop into OBS as a browser source; alerts pushed over a
-  WebSocket appear instantly with no page reload. Back-to-back alerts queue rather than overwriting
-  each other.
-- **Twitch events** — follows, new subs, resubs, cheers, raids and channel point redeems all fire
-  alerts automatically via EventSub.
-- **Media overlay** — a second browser source that plays clips and gifs, queued so two redeems in a
-  row play in order.
-- **OBS control** — switch scenes and show/hide sources from the dashboard, picking from dropdowns
-  populated by OBS itself.
-- **Death counter** — a corner overlay counting this stream's Monsters & Memories deaths, read live
-  from the game's own event journal (the Ledger). Underdark-grimoire styling: a Lolth spider sigil in a
-  ring of runes, a candle-lit blackletter count, and a bell on every death.
-- **Level-up alerts** — your Monsters & Memories level-ups pop on the alert overlay like any Twitch
-  event, read from the same Ledger.
-- **Zone banner** — a grimoire-styled lower-third that names each M&M zone as you enter it, with an
-  optional line of lore you write yourself in `backend/zones.json`.
-- **Ledger history** — every M&M Ledger event (loot, coin, harvests, trades, level-ups, party
-  members) kept in SQLite and queryable, the raw material for recaps.
-- **Panic button** — one click clears every queue and blanks every overlay.
-- **Reliable delivery** — every event carries a sequence id and the last 50 are replayed to an overlay
-  that reconnects, so an alert landing during a blip isn't lost.
-- **Live status** — the control panel shows backend health and WebSocket connection state at a glance.
-- **Auto-reconnect** — overlays recover on their own if the backend restarts mid-stream.
+### On stream
 
-## Architecture
+| Overlay | What it does |
+|---|---|
+| **Alerts** | Follow, sub, resub, cheer, raid, redeem and level-up alerts. Each kind has its own headline, accent colour and synthesised jingle. Back-to-back alerts queue instead of overwriting each other. |
+| **Media** | Plays clips and gifs triggered by channel point redeems. Redeems queue in order, or a clip can be set to cut in. |
+| **Death counter** | A corner widget counting this stream's Monsters & Memories deaths. It has an Underdark-grimoire look: a spider sigil in a ring of runes, a candle-lit blackletter count, and a bell on every death. |
+| **Zone banner** | A lower-third that names each M&M zone as you enter it, with an optional line of lore you write yourself. |
 
-The thing worth understanding up front: there are **two different WebSockets**, pointing in opposite
-directions.
+### Behind the scenes
+
+- **Twitch EventSub.** Follows, new subs, resubs, cheers, raids and channel point redeems fire alerts
+  with no polling and no third-party alert service.
+- **Chat bot.** Posts to chat as its own Twitch account, behind a rate limiter that keeps it from
+  getting timed out.
+- **OBS control.** Switch scenes and tick sources on and off from the dashboard. The lists come from
+  OBS itself, so you choose from what actually exists.
+- **Reward routing.** Each channel point reward can trigger an alert, a clip, or both. Rewards are
+  matched by their stable reward id, so renaming one on Twitch changes nothing here.
+- **Ledger history.** Every M&M Ledger event (loot, coin, harvests, trades, level-ups, party members) is
+  stored in SQLite and can be queried. That's the raw material for stream recaps.
+- **Reliable delivery.** Every event carries a sequence id. An overlay that drops its connection and
+  reconnects is sent what it missed, so an alert landing during a network blip isn't lost.
+- **Live settings.** Alert labels, colours, sounds, duration and volume are edited in the dashboard and
+  reach OBS immediately, with no browser-source refresh.
+- **Panic button.** One click clears every queue and blanks every overlay.
+- **Self-healing.** Overlays reconnect on their own after a backend restart. On startup the backend
+  also refreshes any OBS browser source that got stuck on an error page.
+- **Graceful degradation.** OBS closed, Twitch not configured, M&M not installed: each one just
+  disables its own feature. Nothing stops the backend from booting.
+
+---
+
+## How it fits together
 
 ```mermaid
 graph LR
-    B["Browser<br/>/control"] -->|"HTTP /api"| V["Vite :5173<br/>(proxy)"]
-    O["OBS browser source<br/>/overlay/alert"] <-->|"WebSocket /ws"| V
-    V <--> F["FastAPI :8000"]
-    F -->|"WebSocket client<br/>:4455"| OBS["OBS<br/>WebSocket Server"]
+    D["Dashboard<br/>/control"] -->|"HTTP /api"| F["FastAPI :8000"]
+    D <-->|"WebSocket /ws"| F
+    O["OBS browser sources<br/>/overlay/*"] <-->|"WebSocket /ws"| F
+    F -->|"WebSocket client :4455"| OBS["OBS WebSocket server"]
+    F -->|"EventSub WebSocket"| T["Twitch"]
+    F -->|"Helix API (bot)"| T
+    F -->|"polls files"| M["M&M Ledger + Player.log"]
 ```
 
-| | `/ws` (alert relay) | `OBSController` |
-|---|---|---|
-| Backend's role | **server** | **client** |
-| Direction | browser dials **in** | backend dials **out** to OBS |
-| Library | FastAPI `WebSocket` | `simpleobsws` |
+The backend is a hub. Everything that happens comes in from Twitch, from the dashboard or from the game
+files, gets turned into a small JSON message, and is broadcast over `/ws` to every open page. Each
+overlay picks out the message types it cares about and ignores the rest.
 
-The browser only ever talks to Vite, which proxies `/api` and `/ws` through to the backend on port 8000.
-That means **both dev servers must be running**.
+There are **several WebSockets, pointing in different directions.** This is the thing most worth
+understanding up front:
+
+| | Who dials whom | Purpose |
+|---|---|---|
+| `/ws` | browsers dial **in** to the backend | the event relay to the overlays and the dashboard |
+| `OBSController` | backend dials **out** to OBS on `:4455` | switching scenes, showing and hiding sources |
+| EventSub | backend dials **out** to Twitch | receiving follows, subs, redeems and so on |
+
+The overlays are **separate pages on purpose.** If they shared one page, a clip and a follow alert would
+fight over a single DOM and a single audio context. As separate browser sources they layer and compose
+independently in OBS.
+
+---
 
 ## Requirements
 
 - **Python** 3.12+ (developed on 3.14)
-- **Node** ^22.18 or >=24.12
+- **Node** `^22.18` or `>=24.12`
 - **OBS Studio** 28+ (the WebSocket server is built in from 28 onward)
+- *Optional:* a Twitch application, for automatic alerts and the chat bot
+- *Optional:* Monsters & Memories, for the death counter, zone banner and level-up alerts
 
-## Setup
+---
 
-Clone, then set up each half.
-
-**Backend**
+## Quick start
 
 ```sh
+git clone https://github.com/Sanguine-Hexcraft/sang_suite.git
+cd sang_suite
+
+# backend
 cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then fill in your OBS password
-```
+cp .env.example .env          # then fill it in -- see Configuration
+cd ..
 
-**Frontend**
-
-```sh
+# frontend
 cd frontend
 npm install
+cd ..
 ```
 
-### Configuring OBS
+Then pick a mode.
 
-1. In OBS: **Tools → WebSocket Server Settings** → enable the server, leave the port at `4455`, and copy
-   the password.
-2. Put that password in `backend/.env`:
-
-   ```
-   OBS_WS_URL=ws://localhost:4455
-   OBS_WS_PASSWORD=your-password-here
-   ```
-
-`.env` is gitignored, so your password never gets committed. The backend starts fine without OBS
-running — the connection is lazy, and errors only surface when you press a control button.
-
-## Running
-
-Both servers, in two terminals:
+### Streaming: one process
 
 ```sh
-# terminal 1 — backend on :8000
+./stream.sh                # build the frontend, then serve everything on :8000
+./stream.sh --skip-build   # reuse the last build when the frontend hasn't changed
+```
+
+Open **<http://localhost:8000/control>**, and point OBS at `http://localhost:8000/overlay/...`.
+
+`stream.sh` rebuilds by default because a stale build fails silently. The backend happily serves
+whatever is in `frontend/dist/`, so without a rebuild an overlay looks as if your code changes never
+landed.
+
+### Developing: two processes
+
+```sh
+# terminal 1 -- backend on :8000, auto-reloads on save
 cd backend && source venv/bin/activate && fastapi dev main.py
 ```
 
 ```sh
-# terminal 2 — frontend on :5173
+# terminal 2 -- Vite on :5173, hot module reload
 cd frontend && npm run dev
 ```
 
-Then open **<http://localhost:5173/control>**.
+Open **<http://localhost:5173/control>**. The browser only talks to Vite, which proxies `/api`, `/ws`
+and `/media` through to the backend.
 
-### Adding the overlays to OBS
+> The two modes can't run at the same time, because both want port 8000.
 
-**Add → Browser Source** for each, size 1920×1080:
+---
 
-- `http://localhost:5173/overlay/alert`
-- `http://localhost:5173/overlay/media`
+## Configuration
 
-In each source's properties, tick **Shutdown source when not visible** and **Refresh browser when
-scene becomes active** — OBS caches page assets aggressively, and these save you from clearing the
-cache by hand every time an overlay changes.
+All machine wiring and secrets live in `backend/.env`. It's gitignored; copy it from
+`backend/.env.example`. Every section is optional: leave one blank and that feature is simply off.
 
-On the media source also tick **Control audio via OBS**, or clip audio never reaches your mix.
+### OBS
 
-The death counter is a corner widget, not a full-canvas page: add
-`http://localhost:8000/overlay/deaths` at about **420×180** and position it where you like. Tick
-**Control audio via OBS** on it too if you want the bell in your mix. Press **New Stream** on the
-dashboard's Death Counter card when you go live. A session older than 6 hours is also replaced
-automatically when the backend starts.
+1. In OBS, open **Tools → WebSocket Server Settings**. Enable the server, leave the port at `4455`, and
+   copy the password.
+2. Add it to `backend/.env`:
 
-The zone banner is a lower-third: add `http://localhost:8000/overlay/zone` at **1920×300** and pin it
-to the bottom edge of the canvas. Names and lore lines live in `backend/zones.json`; press **Test
-Zone** on the dashboard to preview the zone you're standing in.
+   ```ini
+   OBS_WS_URL=ws://localhost:4455
+   OBS_WS_PASSWORD=your-password-here
+   ```
 
-**[`learning/overlays.md`](learning/overlays.md) is the full guide** — every overlay, what fires it,
-how to set it up in OBS and tune it, and what to check when one stays blank.
+The connection is lazy. The backend starts fine without OBS running, and an error only appears when you
+press a control button.
 
-## Routes
+### Twitch alerts
 
-| Route | Purpose |
-|---|---|
-| `/control` | Control panel — alerts, OBS scene/source controls, panic, status |
-| `/overlay/alert` | Transparent alert overlay for an OBS browser source |
-| `/overlay/media` | Clip and gif overlay — its own browser source |
-| `/overlay/deaths` | M&M death counter — a small corner widget |
-| `/overlay/zone` | M&M zone banner — a lower-third |
+1. Register an application at <https://dev.twitch.tv/console/apps>, with the OAuth redirect URL
+   `http://localhost:17563`.
+2. Add its credentials and your channel name to `backend/.env`:
 
-The overlays are separate pages on purpose. Sharing one would mean a video and a follow alert
-fighting over a single DOM and a single audio context; as separate browser sources they compose and
-layer independently in OBS.
+   ```ini
+   TWITCH_CLIENT_ID=...
+   TWITCH_CLIENT_SECRET=...
+   TWITCH_CHANNEL=your_channel_login
+   ```
 
-## API
+3. Make sure `TWITCH_EVENTSUB_WS` and `TWITCH_EVENTSUB_API` are **blank or commented out**. They exist
+   only to point at the Twitch CLI mock server during testing.
+4. Start the backend. A browser tab opens for a one-time **Authorize** click. **Authorize as the
+   broadcaster** (the channel owner), not the bot. Authorizing as anyone else leaves every subscription
+   rejected.
 
-| Method | Endpoint | Body | Description |
+The token is cached in `backend/.twitch_tokens.json` (gitignored, and as sensitive as a password), so
+later restarts are silent.
+
+### Chat bot
+
+The bot is a **second Twitch account** that authorizes the same application. It needs no extra `.env`
+values.
+
+1. Start the backend after the Twitch step above. A second browser tab opens.
+2. On Twitch's consent page, click **"Not you?"** and log in as the bot account. Your browser is
+   normally logged in as the broadcaster.
+3. The bot's token is cached separately, in `backend/.chat_tokens.json`.
+
+If it got authorized as the wrong account, the startup log warns you. Delete `.chat_tokens.json` and
+restart to authorize again.
+
+### Monsters & Memories
+
+Nothing to set in most cases. The game's settings folder is auto-discovered from the umu Wine prefixes
+under `~/.local/share/mnm/`. If your install lives elsewhere (Steam compatdata, a custom prefix),
+point at the folder that holds `settings.json`:
+
+```ini
+MNM_SETTINGS_DIR=/path/to/Niche Worlds Cult/Monsters and Memories
+```
+
+---
+
+## Adding the overlays to OBS
+
+Add each one as **Sources → Add → Browser Source**.
+
+| Overlay | URL | Size | Notes |
 |---|---|---|---|
-| `GET` | `/api/health` | — | Health check, returns `{"status": "ok"}` |
-| `GET` | `/api/config` | — | Current widget settings |
-| `GET` | `/api/activity` | — | Last 20 events, oldest first; survives restarts |
-| `PUT` | `/api/config` | full config object | Replace settings, save to disk, push to overlays |
-| `POST` | `/api/panic` | — | Clear every queue and blank both overlays |
-| `GET` | `/api/obs/scenes` | — | Every scene, plus which is live |
-| `GET` | `/api/obs/sources?scene=` | — | Sources in one scene, with visibility |
-| `POST` | `/api/obs/scene` | `{"scene": "..."}` | Switch the active OBS scene |
-| `POST` | `/api/obs/source` | `{"scene": "...", "source": "...", "visible": true}` | Show/hide a source |
-| `GET` | `/api/deaths` | — | This stream's death count, session start, last death |
-| `POST` | `/api/deaths/reset` | — | New stream: count from now |
-| `POST` | `/api/deaths/adjust` | `{"delta": -1}` | Manual correction (±10 max per call) |
-| `GET` | `/api/ledger/summary?since=&owner=` | — | M&M stats since `since` (default: New Stream) — loot, coin, mobs, harvests, zones, level-ups, party |
-| `GET` | `/api/ledger/recent?kind=&limit=` | — | Latest Ledger events, optionally of one kind (`limit` 1–500) |
-| `GET` | `/api/zone` | — | The M&M zone you're in, with its display name and lore |
-| `WS` | `/ws` | — | Event relay; messages are broadcast to all connected clients |
+| Alerts | `http://localhost:8000/overlay/alert` | 1920 × 1080 | full canvas |
+| Media | `http://localhost:8000/overlay/media` | 1920 × 1080 | tick **Control audio via OBS** |
+| Death counter | `http://localhost:8000/overlay/deaths` | ~420 × 180 | position it in a corner |
+| Zone banner | `http://localhost:8000/overlay/zone` | 1920 × 300 | pin it to the bottom edge |
 
-Alert messages are plain JSON: `{ "type": "alert", "text": "New Follower: Innoruuk" }`
+In development, use port `5173` instead of `8000`.
 
-Twitch alerts add `kind` (`follow`/`sub`/`resub`/`cheer`/`raid`/`redeem`), `user` and `amount`. M&M
-level-ups use the same shape with `kind: "level_up"`, the character as `user` and the new level as
-`amount`. The
-overlay looks `kind` up in the config to pick a headline and accent colour; manual alerts have no
-`kind` and use the `generic` entry.
+On every source, tick **Shutdown source when not visible** and **Refresh browser when scene becomes
+active**. OBS caches page assets aggressively, and these settings save you from clearing the cache by
+hand after an overlay changes. Tick **Control audio via OBS** on any source whose sound you want in your
+mix (media, alerts, the death bell).
 
-Media messages are their own type, read only by `/overlay/media`:
-`{ "type": "media", "src": "/media/videos/bait.webm", "title": "...", "user": "...", "interrupt": false }`
+**[`learning/overlays.md`](learning/overlays.md) is the full guide.** It covers every overlay, what fires
+it, how to set it up and tune it in OBS, and what to check when one stays blank.
 
-Deaths come from the backend, not the dashboard:
-`{ "type": "death", "count": 7, "character": "...", "zone": "Blindmidden", "text": "... died in Blindmidden" }`.
-`count` is the absolute total for the stream, so a replayed message can't make the overlay drift. A reset or
-manual correction is pushed as `{ "type": "deaths", ...state }` and, like `config`, is not replayed.
+---
 
-Zone changes come from the backend too, read only by `/overlay/zone`:
-`{ "type": "zone", "zone": "nightharbore", "name": "Night Harbor East", "lore": "...", "text": "Entered Night Harbor East" }`.
+## The control panel
 
-### Delivery guarantees
+`/control` has two tabs.
 
-Every broadcast except `config` and `panic` is stamped with a monotonic `id` and kept in a 50-message
-history. A client sends `{"type": "hello", "last_id": N}` on connect and is sent only what it missed.
-`hello` is handled by the endpoint and never relayed.
+**Live** holds the cards you use while streaming:
 
-The client's watermark lives in module scope, not `localStorage` — deliberately. It survives the
-reconnect loop (a backend restart, a network blip) but not a page reload, so a browser source opening
-fresh mid-stream starts clean instead of dumping an hour of backlog onto your canvas.
+| Card | What it does |
+|---|---|
+| **Panic** | Clears every queue and blanks every overlay. |
+| **Test Alerts** | Fires an alert of any configured kind with custom text, to check what each one looks and sounds like. |
+| **Bot Chat** | Posts a message as the bot. *Burst ×30* checks the rate limiter. |
+| **OBS Control** | A scene dropdown with *Switch Scene*, plus a checkbox per source in that scene: ticked means visible. The ⟳ button re-reads OBS, since changes made in OBS itself aren't pushed to the page. |
+| **Death Counter** | The live count. *New Stream* starts a fresh count, ±1 corrects it, and *Test* previews the flare and bell without changing the count. |
+| **Monsters & Memories** | Shows whether the backend is actually reading the game: current zone, last banner, last Ledger event. Includes zone and level-up test buttons. |
+| **Test Clips** | Plays any file in `backend/media/` on the media overlay, queued or as an interrupt. Lets you check a clip's codec, volume and framing in OBS before a reward points at it. |
+| **Activity** | The last 50 events, newest first. It survives page refreshes and backend restarts. |
 
-The last 20 events are also written to gitignored `backend/activity.json`, which backs the dashboard's
-activity feed and outlives both a page refresh and a backend restart. The sequence counter is saved
-alongside them: if it reset to 1 on reboot, an overlay still holding a higher `last_id` would see
-every new event as older than what it had already seen and receive no replay at all.
+**Alert Settings** is where you edit the alerts themselves (see below). Unsaved edits survive switching
+back and forth between tabs.
 
-## Settings
+Status pills in the header show whether the API, the WebSocket and OBS are up.
 
-Alert duration and per-kind labels/colours live in `backend/config.json`, editable from `/control`.
-Saving does two things: writes the file, and broadcasts the new config over `/ws` — so changes land
-in OBS immediately without refreshing the browser source.
+---
 
-The file is gitignored and entirely optional. Defaults live in the Pydantic models in `main.py`, so
-a fresh clone runs with no config file and only writes one the first time you hit Save. A malformed
-file logs a warning and falls back to defaults rather than stopping the server.
+## Alert settings and channel point rewards
 
-**Adding an alert kind takes two edits, not one.** `config.json` replaces `kinds` wholesale at load,
-so a key added only to `DEFAULT_KINDS` never reaches the overlay on a machine that already has a
-config file. Add it to both.
+Widget settings live in `backend/config.json`. The file is gitignored and optional: defaults live in the
+Pydantic models in `main.py`, so a fresh clone runs without it, and the file is only written the first
+time you click **Save Settings**. A malformed file logs a warning and falls back to the defaults instead
+of stopping the server.
+
+From the **Alert Settings** tab you can change:
+
+- **Duration** of each alert on screen (0.5–60 s)
+- **Volume** of the jingles
+- the **label**, **accent colour** and **sound** for each alert kind, with a ▶ preview button
+
+Saving writes the file *and* broadcasts the new config over `/ws`, so the change lands in OBS
+immediately.
+
+> **Adding a new alert kind takes two edits, not one:** `DEFAULT_KINDS` in `main.py` *and* `config.json`.
+> The file replaces `kinds` wholesale at load, so a kind added only to the defaults never reaches a
+> machine that already has a config file.
 
 ### Channel point rewards
 
-`config.json` also carries a `rewards` section mapping **reward id** to what should happen:
+`config.json` also has a `rewards` section, mapping each **reward id** to what should happen when it's
+redeemed:
 
 ```json
 "rewards": {
@@ -235,56 +317,190 @@ config file. Add it to both.
 }
 ```
 
-- **Keyed by id, never title** — titles get renamed on a whim, ids are stable.
-- **`label: null`** uses the reward's own Twitch title, so renaming a reward updates the alert for free.
-- **`actions`** may contain `alert`, `media`, or both.
+- **Keyed by id, never by title.** Titles get renamed on a whim; ids are stable.
+- **`label: null`** uses the reward's own Twitch title, so renaming the reward updates the alert for
+  free.
+- **`actions`** can contain `alert`, `media`, or both.
 - **`interrupt`** decides whether a clip cuts in or waits its turn.
 
-Redeeming a reward that isn't listed prints a copy-pasteable line instead of alerting, which is how
-you discover ids:
+Redeeming a reward that isn't listed logs a copy-pasteable line instead of alerting. That's how you
+discover reward ids:
 
 ```
 [redeem] unconfigured reward 'Play a clip' id=9c8b7a6d-… cost=5000 -- add it to config.json
 ```
 
+---
+
 ## Clips and gifs
 
-Media lives in `backend/media/` (gitignored) and is served at `/media`. Drop a file in, reference it
-from a reward's `media` path, and restart — no rebuild, and no video in git.
+Media lives in `backend/media/` (gitignored) and is served at `/media`. Drop a file in, reference it from
+a reward's `media` path, and you're done: no rebuild, and no video in git.
 
-**Encode clips as WebM (VP9 + Opus).** OBS's bundled CEF on Linux frequently ships without
-proprietary codecs, so an H.264/AAC MP4 can play silently, or not at all, *while working perfectly in
-your normal browser*. That asymmetry makes it a genuinely nasty afternoon to debug.
+**Encode clips as WebM (VP9 + Opus).** OBS's bundled browser on Linux frequently ships without
+proprietary codecs. An H.264/AAC MP4 can then play silently, or not at all, *while working perfectly in
+your normal browser*.
 
 ```sh
 ffmpeg -i clip.mp4 -c:v libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 \
        -c:a libopus -b:a 128k clip.webm
 ```
 
-Gifs and webp play as images. They loop forever with no `ended` event, so they're shown on a fixed
-timer rather than chained on playback.
+Gifs and webp files play as images. They loop forever and never fire an `ended` event, so they're shown
+on a fixed timer instead of being chained on playback.
 
-**Error codes worth knowing:** `503` means the backend can't reach OBS (not running, or WebSocket server
-off). `502` means OBS is connected but rejected the request — usually a misspelled scene or source name.
+---
+
+## Monsters & Memories integration
+
+Three watchers read the game's files on a short poll. None of them touches the game itself.
+
+- **Death counter** (`backend/mnm.py`) reads the per-character **Ledger**, the game's JSON event
+  journal. `deaths.json` stores only when the stream started plus any manual correction, never the count
+  itself. The count is recomputed from Ledger timestamps, so a restart can't lose or double it. A session
+  older than 6 hours at startup counts as yesterday's, so the count starts over.
+- **Ledger ingester** (`backend/ledger.py`) copies *every* Ledger event into `backend/ledger.db`
+  (SQLite), broadcasts your own level-ups as alerts, and serves the stats endpoints. Re-ingesting is
+  always safe: rows are keyed by a hash of the event. If you delete the database, it rebuilds from
+  whatever the game still has on disk.
+- **Zone banner** (`backend/zones.py`) tails `Player.log` and announces a zone once the loading screen
+  clears, not when loading starts. Display names and lore come from `backend/zones.json`, which is
+  committed, editable, and re-read on every zone change.
+
+On startup each watcher quietly catches up on what's already on disk, so a backend restart mid-stream
+never replays old deaths, level-ups or zones.
+
+---
+
+## API reference
+
+All routes are under `/api`. Responses are JSON.
+
+| Method | Endpoint | Body | Description |
+|---|---|---|---|
+| `GET` | `/api/health` | | Health check: `{"status": "ok"}` |
+| `GET` | `/api/activity` | | The last 20 events, oldest first; survives restarts |
+| `POST` | `/api/panic` | | Clear every queue and blank every overlay |
+| `POST` | `/api/chat` | `{"text": "..."}` | Post to chat as the bot (1–500 chars) |
+| `GET` | `/api/config` | | Current widget settings |
+| `PUT` | `/api/config` | full config object | Replace settings, save them to disk, push them to the overlays |
+| `GET` | `/api/media` | | Every file in `backend/media/`, as reward-ready paths |
+| `GET` | `/api/obs/scenes` | | Every scene, plus which one is live |
+| `GET` | `/api/obs/sources?scene=` | | The sources in one scene, with visibility |
+| `POST` | `/api/obs/scene` | `{"scene": "..."}` | Switch the live scene |
+| `POST` | `/api/obs/source` | `{"scene": "...", "source": "...", "visible": true}` | Show or hide a source |
+| `GET` | `/api/deaths` | | This stream's death count, session start and last death |
+| `POST` | `/api/deaths/reset` | | New stream: count from now |
+| `POST` | `/api/deaths/adjust` | `{"delta": -1}` | Manual correction (±10 per call) |
+| `GET` | `/api/ledger/summary?since=&owner=` | | M&M stats since `since` (default: the last New Stream) |
+| `GET` | `/api/ledger/recent?kind=&limit=` | | The latest Ledger events, optionally of one kind (`limit` 1–500) |
+| `GET` | `/api/zone` | | The zone you're in, with its display name and lore |
+
+The error codes worth knowing:
+
+| Code | Meaning |
+|---|---|
+| `503` | The backend can't reach the service: OBS isn't running or its WebSocket server is off, or the bot isn't connected. |
+| `502` | The service was reached but refused: usually a misspelled scene or source name, or Twitch rejecting a chat message. |
+| `429` | The bot's own rate limiter refused the message (20 per 30 s). |
+
+---
+
+## WebSocket protocol
+
+`/ws` is a broadcast relay: every message goes to every connected page.
+
+**Alerts**, from Twitch, from the dashboard, or from M&M level-ups:
+
+```json
+{ "type": "alert", "kind": "follow", "user": "Innoruuk", "amount": null, "text": "New Follower: Innoruuk" }
+```
+
+`kind` selects the label, colour and sound from the config. Manual alerts without a `kind` use
+`generic`.
+
+**Media**, read only by `/overlay/media`:
+
+```json
+{ "type": "media", "src": "/media/videos/bait.webm", "title": "...", "user": "...", "interrupt": false }
+```
+
+**Deaths**, from the backend:
+
+```json
+{ "type": "death", "count": 7, "character": "...", "zone": "Blindmidden", "text": "... died in Blindmidden" }
+```
+
+`count` is the absolute total for the stream, so a replayed message can't make the overlay drift. A reset
+or manual correction is pushed as `{"type": "deaths", ...state}`.
+
+**Zone changes**, read only by `/overlay/zone`:
+
+```json
+{ "type": "zone", "zone": "nightharbore", "name": "Night Harbor East", "lore": "...", "text": "Entered Night Harbor East" }
+```
+
+**Server-only messages:** `config` (settings changed), `panic`, `deaths` (counter state) and `ledger`
+(feed-only Ledger events). A client can only *send* `alert`, `death`, `zone` and `media`. Anything else
+is dropped, and a `media` message whose `src` isn't under `/media/` is refused.
+
+### Delivery guarantees
+
+Every broadcast except `config`, `panic`, `deaths` and test previews is stamped with a monotonic `id` and
+an `at` timestamp, and kept in a 50-message history. When a client connects, it sends
+`{"type": "hello", "last_id": N}` and receives only what it missed, flagged `replay: true`. The endpoint
+handles `hello` itself and never relays it.
+
+The client keeps its watermark in module scope, deliberately not in `localStorage`. It survives the
+reconnect loop (a backend restart, a network blip) but not a page reload. That way, a browser source
+opening fresh mid-stream starts clean instead of dumping an hour of backlog onto your canvas.
+
+The last 20 events are also saved to `backend/activity.json`, *together with the sequence counter*. If
+the counter reset to 1 after a reboot, an overlay still holding a higher `last_id` would treat every new
+event as already seen and get no replay at all.
+
+---
+
+## Security model
+
+**Nothing has a login, so the backend is local-only by design.** Anyone who can reach it can post as the
+bot, switch your scenes and put any clip on stream. These guards keep it that way:
+
+- **Loopback only.** `stream.sh` binds `127.0.0.1`, so other machines on your network can't connect.
+- **DNS rebinding.** `TrustedHostMiddleware` refuses any `Host` other than `localhost` or `127.0.0.1`.
+- **Cross-site requests.** A web page you visit could otherwise POST to `localhost:8000` or open `/ws`
+  (WebSockets ignore CORS). A non-local `Origin` header is refused on every non-GET request and on the
+  WebSocket handshake. Requests with no `Origin` at all, like curl, aren't from a web page and are
+  allowed.
+- **Relay allow-list.** Clients can only relay `alert`, `death`, `zone` and `media` messages. The
+  messages only the server sends can't be forged, and media must come from the backend's own `/media`
+  mount. The media overlay checks that again before playing anything.
+- **No HTML injection.** Viewer-supplied text, like redeem input and display names, is always rendered
+  as text and never as HTML.
+- **Secrets stay out of git.** `.env`, both token caches, the config and all runtime state are
+  gitignored.
+
+Don't expose port 8000 to the internet or your LAN (no `--host 0.0.0.0`, no port forwarding, no tunnel)
+without adding authentication first.
+
+---
 
 ## Project structure
 
 ```
 backend/
-  main.py            # the entire backend: relay, OBS controller, routes, settings
-  twitch.py          # EventSub client — follows, subs, resubs, cheers, raids, redeems
-  chat.py            # bot chat sending (stub; Phase 12)
-  mnm.py             # M&M Ledger watcher for the death counter (Phase 14)
-  ledger.py          # M&M Ledger ingester: every event into SQLite, level-up alerts, stats API
+  main.py            # the app: relay, OBS controller, routes, settings, security guards
+  twitch.py          # EventSub client: follows, subs, resubs, cheers, raids, redeems
+  chat.py            # the bot: sends chat via Helix as its own identity, rate-limited
+  mnm.py             # M&M Ledger watcher for the death counter
+  ledger.py          # M&M Ledger ingester: every event into SQLite, level-up alerts, stats
   zones.py           # M&M Player.log watcher for the zone banner
   zones.json         # zone display names and lore lines -- edit freely, re-read live
-  requirements.txt   # pinned deps
-  .env.example       # config template
-  config.json        # widget settings + reward routing, written by /control (gitignored)
-  activity.json      # last 20 events, for the dashboard feed (gitignored)
-  deaths.json        # death counter session start + manual corrections (gitignored)
-  ledger.db          # every M&M Ledger event ever seen (gitignored)
-  media/             # clips and gifs, served at /media (gitignored)
+  requirements.txt   # pinned dependencies
+  .env.example       # configuration template
+  # gitignored, created at runtime:
+  .env  .twitch_tokens.json  .chat_tokens.json
+  config.json  activity.json  deaths.json  ledger.db  media/
 frontend/
   src/
     views/
@@ -293,80 +509,110 @@ frontend/
       MediaOverlay.vue   # /overlay/media
       DeathOverlay.vue   # /overlay/deaths
       ZoneOverlay.vue    # /overlay/zone
-    stores/overlay.ts    # Pinia store wrapping the WebSocket
+    stores/overlay.ts    # Pinia store wrapping the WebSocket, replay watermark
     audio/sounds.ts      # synthesised per-kind jingles
     router/index.ts      # route declarations
   vite.config.ts     # dev proxy for /api, /ws and /media
-notes/
-  obs-overlay-roadmap.md         # phases 0–8
-  obs-overlay-roadmap-part-2.md  # phases 9–13
+stream.sh            # build + serve on 127.0.0.1:8000 for streaming
 learning/
   how-it-works.md    # a walkthrough of the whole system
-  overlays.md        # guide to every overlay: what fires it, OBS setup, tuning
+  overlays.md        # every overlay: what fires it, OBS setup, tuning, troubleshooting
+notes/               # the phase-by-phase roadmap this was built from
 ```
+
+---
 
 ## Development
 
 From `frontend/`:
 
-- `npm run type-check` — run `vue-tsc`; use this to verify TypeScript changes
-- `npm run build` — type-check plus a production build
+- `npm run type-check`: runs `vue-tsc`; use it to verify TypeScript changes
+- `npm run build`: type-check plus a production build
 
-There are no tests or linters configured yet in either half.
+There are no tests or linters in either half yet.
 
-### Production mode (one process)
+When you add a backend package, install it into the venv and regenerate `requirements.txt`. Keep the
+`fastapi[standard]` extra.
 
-Development needs two servers, but for actually streaming you can collapse to one:
+### How production serving works
 
-```sh
-cd frontend && npm run build      # writes frontend/dist/
-cd ../backend && source venv/bin/activate && fastapi run main.py
-```
+In streaming mode, FastAPI serves `frontend/dist/` at `/`. That mount is registered **last** in
+`main.py`, because a mount at `/` shadows every route declared after it. New routes must go above it,
+and so must the `/media` mount.
 
-FastAPI serves `frontend/dist/` at `/`, so point OBS at `http://localhost:8000/overlay/alert` and
-stop running Vite. The mount is registered last and skipped entirely when `dist/` is absent, so this
-changes nothing about the dev workflow — if you haven't built, the backend just logs a note and
-serves the API alone.
+`/control` and `/overlay/*` are client-side routes with no file on disk. Unmatched paths fall back to
+`index.html` and let vue-router take over, except paths under `/api`, so a mistyped endpoint still
+returns a JSON 404. Everything except the content-hashed bundles is served with `Cache-Control:
+no-cache`, so OBS never holds on to a stale `index.html`.
 
-Because `/control` and `/overlay/alert` are client-side routes with no file on disk, unmatched paths
-fall back to `index.html` and let vue-router take over. Paths under `/api` are excluded from that
-fallback so a wrong endpoint still returns a JSON 404 instead of a page.
-
-Remember to rebuild after frontend changes — in this mode the backend serves whatever was in `dist/`
-at request time, not your working tree.
-
-**Gotchas**
+### Gotchas
 
 - Every `.vue` file with a script block must use `<script setup lang="ts">`. Plain `<script setup>`
-  compiles fine but breaks `vue-tsc` with TS7016, because `allowJs` is off.
-- `<style scoped>` cannot style `body` — scoped rules only match elements the component renders. Use a
-  global stylesheet or `:global(body)` for page-level styling.
-- Overlay pages need transparent backgrounds. Don't put colors on `body` in the global stylesheet; they
-  will leak into your overlays.
+  compiles, but breaks `vue-tsc` with TS7016 because `allowJs` is off.
+- `<style scoped>` can't style `body`. Use a global style or `:global(body)`. Overlay pages need a
+  transparent background, so never put a colour on `body` globally.
+- **Never put a fixed timeout on media playback.** A cap meant as a stall backstop cuts off any clip
+  longer than it. Watchdogs must measure *lack of progress*, and whatever ends a clip must pause it and
+  clear its `src`.
+- A new client-sent message type must be added to `RELAYABLE` in `main.py`, or the relay drops it, and
+  the only sign is a `[ws] dropped` log line.
 
-## Status
+---
 
-**v1.0.** Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roadmap.md)
-and [part 2](notes/obs-overlay-roadmap-part-2.md).
+## Troubleshooting
 
-- [x] **Phases 0–3** — scaffold, backend skeleton, Vite proxy
-- [x] **Phase 4** — WebSocket alert relay
-- [x] **Phase 5** — overlay running live in OBS
-- [x] **Phase 6** — OBS control from Python
-- [x] **Phase 7** — Twitch EventSub (follows/subs fire alerts automatically)
-- [x] **Phase 8** — persistence and a single-process production build
-- [x] **Phase 9** — sequence ids and replay, so a reconnect blip can't swallow an event
-- [x] **Phase 10** — channel point redeems, routed per reward
-- [x] **Phase 11** — the media overlay, queueing and the panic button
-- [x] **Phase 14** — the M&M death counter, read from the game's Ledger
-- [x] **M&M, continued** — Ledger history in SQLite, level-up alerts, the zone banner
-- [x] **Phase 12** — the bot speaks, posting to chat as its own account
-- [ ] **Phase 13** — song requests: `!sr <youtube link>` in chat, played in its own overlay
-- [ ] **Phase 15** — loot boxes
+**An overlay is blank.** Check the dashboard's WS pill first. In OBS, right-click the source and choose
+**Interact**, then look at the console. Make sure the port matches the mode you're running (8000 for
+streaming, 5173 for development). [`learning/overlays.md`](learning/overlays.md) has a checklist for each
+overlay.
+
+**My code changes don't show up in OBS.** You're probably serving a stale build. Run `./stream.sh`
+without `--skip-build`.
+
+**Twitch alerts stopped working.** Check the token at `https://id.twitch.tv/oauth2/validate`: it must
+belong to the broadcaster and have the expected scopes. Then call
+`GET /helix/eventsub/subscriptions`. Subscriptions only report `enabled` while the session WebSocket is
+alive, so that one call proves both auth and connectivity. An expired token is rarely the cause.
+
+**Resubs don't alert.** They do, as kind `resub`: `channel.subscribe` fires only for *new*
+subscribers, and renewals arrive separately.
+
+**A clip plays silently in OBS but fine in Chrome.** It's the codec. Re-encode it as WebM; see
+[Clips and gifs](#clips-and-gifs).
+
+**OBS buttons return 503.** OBS isn't running, or its WebSocket server is off. A **502** means OBS
+answered but refused the request, usually because of a scene or source name.
+
+**The death counter shows "M&M not found".** Auto-discovery found no game folder. Set
+`MNM_SETTINGS_DIR` in `backend/.env`.
+
+---
+
+## Roadmap
+
+Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roadmap.md) and
+[part 2](notes/obs-overlay-roadmap-part-2.md).
+
+- [x] **Phases 0–3**: scaffold, backend skeleton, Vite proxy
+- [x] **Phase 4**: WebSocket alert relay
+- [x] **Phase 5**: overlay running live in OBS
+- [x] **Phase 6**: OBS control from Python
+- [x] **Phase 7**: Twitch EventSub, so follows and subs fire alerts automatically
+- [x] **Phase 8**: persistence and a single-process production build
+- [x] **Phase 9**: sequence ids and replay, so a reconnect blip can't swallow an event
+- [x] **Phase 10**: channel point redeems, routed per reward
+- [x] **Phase 11**: the media overlay, queueing and the panic button
+- [x] **Phase 12**: the bot speaks, posting to chat as its own account
+- [x] **Phase 14**: the M&M death counter, read from the game's Ledger
+- [x] **M&M, continued**: Ledger history in SQLite, level-up alerts, the zone banner
+- [ ] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay)
+- [ ] **Phase 15**: loot boxes
 
 ### Known gaps
 
-- Resubs alert, but **gift-sub gifter announcements**, `stream.online`/`offline` and unsubs are not
-  subscribed yet. All three need no new OAuth scopes.
-- The OBS dropdowns are a snapshot, not live — press ⟳ after changing scenes in OBS.
+- Gift-sub gifter announcements, `stream.online`/`offline` and unsubs aren't subscribed yet. None of
+  them needs a new OAuth scope.
+- The bot can send but not yet read chat, so there are no chat commands until Phase 13.
+- The OBS scene and source lists are a snapshot, not live. Press ⟳ after changing things in OBS
+  itself.
 - No tests or linters in either half.
