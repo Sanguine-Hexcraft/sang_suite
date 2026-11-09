@@ -321,7 +321,7 @@ A Song Requests card in `/control`. Requests open/closed toggle, the now-playing
 
 **13d done 2026-11-09.** Open/close and volume go through their own `POST /api/songs/settings`, not the config PUT: the settings tab saves a draft cloned at page load, which would have undone them. That Save now sends only `alerts`. Opening or closing requests is announced in chat.
 
-**Next: text search** (`!sr <title and/or artist>`). `search.list` costs 100 units against 1 for a link, so it needs a daily search budget and a per-viewer cooldown, and every free check runs before it. It takes the top 5 results and checks them all in one `videos.list` call, because the top hit for a famous song is often a label video that blocks embedding.
+**Text search, added 2026-11-09** (`!sr <title and/or artist>`). `search.list` costs 100 units against 1 for a link, so it needs a daily search budget and a per-viewer cooldown, and every free check runs before it. It takes the top 5 results (Music category, embeddable only, strict safe search) and checks them all in one `videos.list` call, because the top hit for a famous song is often a label video that blocks embedding. The budget defaults to 60 a day with a 2-minute cooldown, and the bot's reply includes the link of whatever it picked.
 
 ---
 

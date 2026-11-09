@@ -142,6 +142,13 @@ class SongConfig(BaseModel):
     # still sits on top of it; this is for balancing songs against the game
     # without leaving the dashboard.
     volume: int = Field(default=50, ge=0, le=100)
+    # `!sr <title and/or artist>`. A search costs 100 of the free 10,000 daily
+    # quota units where a link costs 1, so it's capped: the budget leaves
+    # room for thousands of link lookups even when it's used up, and the
+    # per-viewer cooldown stops one person spending it all.
+    search_enabled: bool = True
+    search_daily_budget: int = Field(default=60, ge=0, le=95)
+    search_cooldown_s: int = Field(default=120, ge=0, le=3600)
     # Video ids and channel ids in one list -- they can't collide (channel ids
     # are 24 characters starting UC, video ids 11).
     blocklist: list[str] = []
@@ -682,6 +689,7 @@ class SongSettingsBody(BaseModel):
     # Both optional: the dashboard sends one at a time.
     enabled: bool | None = None
     volume: int | None = Field(default=None, ge=0, le=100)
+    search_enabled: bool | None = None
 
 
 @app.post("/api/songs/settings")

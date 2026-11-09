@@ -106,6 +106,8 @@ export interface SongState {
   queue: SongRequest[]
   paused: boolean
   history: PlayedSong[] // newest first, capped at 50 by the backend
+  // Searches spent on `day`, the Pacific date Google's quota runs on.
+  searches: { day: string; used: number }
 }
 
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
@@ -131,6 +133,9 @@ export interface AppConfig {
     who: 'everyone' | 'subs' | 'vip_mod'
     blocklist: string[]
     volume: number // 0-100, the player's own volume
+    search_enabled: boolean // `!sr <song name>`, not just links
+    search_daily_budget: number // searches per Pacific day (100 quota units each)
+    search_cooldown_s: number // per viewer
   }
 }
 

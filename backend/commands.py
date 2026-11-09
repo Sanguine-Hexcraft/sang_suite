@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from songs import SongQueue
+from songs import SongQueue, parse_video_id
 from twitch import ChatLine
 
 if TYPE_CHECKING:  # main.py imports this module
@@ -139,7 +139,7 @@ class ChatCommands:
     # --- the commands -------------------------------------------------------
     async def _sr(self, line: ChatLine, args: str, reply: Reply) -> None:
         if not args.strip():
-            await reply("usage: !sr <youtube link>")
+            await reply("usage: !sr <youtube link or song name>")
             return
         if reason := self._may_request(line):
             await reply(reason)
@@ -152,7 +152,10 @@ class ChatCommands:
             return
         pos = self._songs.position(req.request_id)
         where = "playing now" if pos == 0 else f"#{pos} in the queue"
-        await reply(f"queued {_short(req.title)} ({where})")
+        # A search is the bot's guess, so show what it picked: the viewer can
+        # check the link and `!wrongsong` it. A link they pasted needs no echo.
+        link = f" youtu.be/{req.video_id}" if parse_video_id(args) is None else ""
+        await reply(f"queued {_short(req.title)} ({where}){link}")
 
     async def _song(self, line: ChatLine, args: str, reply: Reply) -> None:
         now = self._songs.now
@@ -168,7 +171,7 @@ class ChatCommands:
     async def _queue(self, line: ChatLine, args: str, reply: Reply) -> None:
         waiting = self._songs.queue
         if not waiting:
-            await reply("the queue is empty. !sr <youtube link> to add one")
+            await reply("the queue is empty. !sr <youtube link or song name> to add one")
             return
         nxt = " | ".join(f"{i}. {_short(r.title)}" for i, r in enumerate(waiting[:3], 1))
         more = f" (+{len(waiting) - 3} more)" if len(waiting) > 3 else ""

@@ -26,7 +26,9 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Awaitable, Callable, Protocol
 
 import httpx
@@ -38,6 +40,17 @@ SONGS_PATH = Path(__file__).with_name("songs.json")
 HISTORY_LIMIT = 50
 
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+
+# How many search results to consider. All of them are checked in one
+# videos.list call (1 unit however many ids), and the first that passes every
+# rule wins. More than one matters: the top hit for a famous song is often
+# the label's official video, which frequently refuses embedding, while the
+# lyric or audio upload a place or two down plays fine.
+SEARCH_CANDIDATES = 5
+# Google resets the daily quota at midnight Pacific time, wherever you are, so
+# the search budget's "day" has to be that day too.
+QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 
 
 # --- parsing untrusted text --------------------------------------------------
@@ -95,6 +108,7 @@ def parse_duration(iso: str) -> int | None:
 # --- the YouTube lookup ------------------------------------------------------
 @dataclass
 class VideoInfo:
+    video_id: str
     title: str
     channel: str
     channel_id: str
@@ -103,53 +117,100 @@ class VideoInfo:
     live: bool
 
 
-async def lookup(video_id: str, api_key: str) -> tuple[VideoInfo | None, str | None]:
-    """Ask the Data API about one video. Returns (info, None) or (None, reason).
+async def _youtube_get(
+    url: str, params: dict, what: str
+) -> tuple[dict | None, str | None]:
+    """GET a Data API endpoint. Returns (json, None) or (None, reason).
 
-    One `videos.list` call answers every question the queue needs -- title and
-    channel for the reply, duration for the cap, embeddable so we refuse now
-    instead of failing on stream, live so a stream that never ends can't
-    wedge the queue. Never raises: a YouTube outage refuses one request, it
-    doesn't take the endpoint down.
+    Never raises: a YouTube outage refuses one request, it doesn't take the
+    endpoint down.
     """
-    params = {
-        "part": "snippet,contentDetails,status",
-        "id": video_id,
-        "key": api_key,
-    }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(YOUTUBE_VIDEOS_URL, params=params)
+            res = await client.get(url, params=params)
     except httpx.HTTPError as exc:
-        print(f"[songs] lookup failed for {video_id}: {exc}")
+        print(f"[songs] {what} failed: {exc}")
         return None, "couldn't reach YouTube, try again in a bit"
-
     if res.status_code != 200:
         # 400 = bad key, 403 = quota exhausted or the key isn't allowed this
         # API. Logged in full for you; the viewer gets a generic line, since
         # the API's error text can mention the key's project.
-        print(f"[songs] lookup {video_id} -> HTTP {res.status_code}: {res.text[:300]}")
+        print(f"[songs] {what} -> HTTP {res.status_code}: {res.text[:300]}")
         return None, "YouTube refused the lookup, try again later"
+    return res.json(), None
 
-    items = res.json().get("items", [])
-    if not items:
-        # Private, deleted, or a well-formed id that was never a video. All the
-        # same to a viewer.
-        return None, "couldn't find that video (private or removed?)"
 
-    v = items[0]
-    snippet = v.get("snippet", {})
-    duration = parse_duration(v.get("contentDetails", {}).get("duration", ""))
-    return VideoInfo(
-        title=snippet.get("title", "(untitled)"),
-        channel=snippet.get("channelTitle", "?"),
-        channel_id=snippet.get("channelId", ""),
-        duration_s=duration or 0,
-        embeddable=bool(v.get("status", {}).get("embeddable", False)),
-        # "live" while streaming, "upcoming" for a scheduled premiere; both
-        # are unplayable as a song. "none" is an ordinary video.
-        live=snippet.get("liveBroadcastContent", "none") != "none",
-    ), None
+async def lookup(
+    video_ids: list[str], api_key: str
+) -> tuple[list[VideoInfo], str | None]:
+    """Ask the Data API about up to 50 videos in one call (1 quota unit).
+
+    Returns (infos, None) in the order the ids were given, skipping any that
+    don't exist; or ([], reason) if YouTube couldn't be asked at all.
+
+    One `videos.list` call answers every question the queue needs -- title and
+    channel for the reply, duration for the cap, embeddable so we refuse now
+    instead of failing on stream, live so a stream that never ends can't
+    wedge the queue.
+    """
+    params = {
+        "part": "snippet,contentDetails,status",
+        "id": ",".join(video_ids),
+        "key": api_key,
+    }
+    data, reason = await _youtube_get(YOUTUBE_VIDEOS_URL, params, f"lookup {video_ids}")
+    if data is None:
+        return [], reason
+
+    found: dict[str, VideoInfo] = {}
+    for v in data.get("items", []):
+        snippet = v.get("snippet", {})
+        duration = parse_duration(v.get("contentDetails", {}).get("duration", ""))
+        found[v["id"]] = VideoInfo(
+            video_id=v["id"],
+            title=snippet.get("title", "(untitled)"),
+            channel=snippet.get("channelTitle", "?"),
+            channel_id=snippet.get("channelId", ""),
+            duration_s=duration or 0,
+            embeddable=bool(v.get("status", {}).get("embeddable", False)),
+            # "live" while streaming, "upcoming" for a scheduled premiere;
+            # both are unplayable as a song. "none" is an ordinary video.
+            live=snippet.get("liveBroadcastContent", "none") != "none",
+        )
+    # The API doesn't promise to answer in the order asked, and for search
+    # results that order is the ranking, so put it back.
+    return [found[i] for i in video_ids if i in found], None
+
+
+async def search(query: str, api_key: str) -> tuple[list[str], str | None]:
+    """Search YouTube for a song. Returns (video ids, best first) or ([], reason).
+
+    **Costs 100 quota units**, against 1 for a lookup -- the whole reason the
+    search path has a daily budget. Only ids come back; the caller looks them
+    all up in one more call, since search results carry no duration.
+    """
+    params = {
+        "part": "id",
+        "q": query,
+        "type": "video",
+        "maxResults": SEARCH_CANDIDATES,
+        # Filters YouTube applies for free, so fewer candidates are wasted:
+        # only embeddable videos, only the Music category, and nothing the
+        # strictest safe search would hide -- it's searching on stream.
+        "videoEmbeddable": "true",
+        "videoCategoryId": "10",
+        "safeSearch": "strict",
+        "key": api_key,
+    }
+    data, reason = await _youtube_get(YOUTUBE_SEARCH_URL, params, f"search {query!r}")
+    if data is None:
+        return [], reason
+    ids = [
+        item["id"]["videoId"]
+        for item in data.get("items", [])
+        if item.get("id", {}).get("videoId")
+    ]
+    return ids, None
 
 
 # --- the queue ---------------------------------------------------------------
@@ -190,6 +251,9 @@ class SongRules(Protocol):
     max_queue: int
     per_user_limit: int
     blocklist: list[str]
+    search_enabled: bool
+    search_daily_budget: int
+    search_cooldown_s: int
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -229,6 +293,15 @@ class SongQueue:
         # plus `ended_at`, `outcome` and `detail`. Kept as plain dicts: it's a
         # record, nothing ever acts on it again.
         self.history: list[dict] = []
+        # Searches spent today, against config's daily budget. `search_day` is
+        # the Pacific date they were counted on (see QUOTA_TZ); a new day
+        # means a fresh count. Saved, so a restart can't hand out a second
+        # day's worth of searches.
+        self.search_day = ""
+        self.searches_used = 0
+        # user_id -> monotonic time of their last search. Not saved: a restart
+        # resetting a two-minute cooldown costs nothing.
+        self._searched: dict[str, float] = {}
         self._load()
 
     # --- persistence --------------------------------------------------------
@@ -246,6 +319,9 @@ class SongQueue:
             self.queue = [SongRequest(**r) for r in saved.get("queue", [])]
             self.paused = bool(saved.get("paused", False))
             self.history = list(saved.get("history", []))[:HISTORY_LIMIT]
+            searches = saved.get("searches") or {}
+            self.search_day = str(searches.get("day", ""))
+            self.searches_used = int(searches.get("used", 0))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             print(f"[songs] {SONGS_PATH.name} unusable, starting empty: {exc}")
             self.now, self.queue, self.paused, self.history = None, [], False, []
@@ -276,19 +352,30 @@ class SongQueue:
             "queue": [asdict(r) for r in self.queue],
             "paused": self.paused,
             "history": self.history,
+            "searches": {"day": self.search_day, "used": self._searches_today()},
         }
 
+    @staticmethod
+    def _quota_day() -> str:
+        return datetime.now(QUOTA_TZ).date().isoformat()
+
+    def _searches_today(self) -> int:
+        return self.searches_used if self.search_day == self._quota_day() else 0
+
     # --- requests -----------------------------------------------------------
-    def _room_for(self, rules: SongRules, video_id: str, user_id: str) -> str | None:
+    def _room_for(
+        self, rules: SongRules, video_id: str | None, user_id: str
+    ) -> str | None:
         """The checks that depend on the queue's contents. None = fits.
 
         Run twice: before the lookup, to avoid spending quota on a request
         that can't fit; and again after, because the lookup awaits, and while
         it does another request can arrive and take the last slot. Checking
         only before would let thirty simultaneous `!sr`s all squeeze past a
-        twenty-song cap.
+        twenty-song cap. `video_id` is None before a search, when there's no
+        video yet to check for duplicates.
         """
-        if any(r.video_id == video_id for r in self._all()):
+        if video_id and any(r.video_id == video_id for r in self._all()):
             return "that song is already in the queue"
         # Counts songs *waiting*, not the one playing: once your song is on,
         # you can queue the next. That's what viewers expect "one each" to mean.
@@ -299,6 +386,30 @@ class SongQueue:
             return "the queue is full"
         return None
 
+    @staticmethod
+    def _refusal(info: VideoInfo, rules: SongRules) -> str | None:
+        """The rules about the video itself. None = playable here.
+
+        Shared by links and search: a link gets this reason back, while a
+        search just moves on to its next candidate.
+        """
+        if info.live:
+            return "live streams can't be requested"
+        if not info.embeddable:
+            return "that video can't be played outside YouTube"
+        if info.video_id in rules.blocklist:
+            return "that song isn't allowed here"
+        if info.channel_id in rules.blocklist:
+            return "songs from that channel aren't allowed here"
+        if info.duration_s <= 0:
+            return "couldn't tell how long that video is"
+        if info.duration_s > rules.max_duration_s:
+            return (
+                f"that's {_fmt_duration(info.duration_s)} long, "
+                f"the limit is {_fmt_duration(rules.max_duration_s)}"
+            )
+        return None
+
     def _all(self) -> list[SongRequest]:
         return ([self.now] if self.now else []) + self.queue
 
@@ -307,10 +418,10 @@ class SongQueue:
     ) -> tuple[SongRequest | None, str | None]:
         """Try to queue `text` for `user`. Returns (request, None) or (None, reason).
 
-        The one entry point for every source: POST /api/songs/request now,
-        `!sr` in chat later -- identical code path, so the dashboard test
-        proves the chat command. Each reason is a short sentence the bot can
-        say straight back to the viewer.
+        The one entry point for every source -- the dashboard and `!sr` run
+        identical code, so testing one proves the other. `text` is a link (or
+        a bare id), or failing that a search. Each reason is a short sentence
+        the bot can say straight back to the viewer.
         """
         rules = self._get_rules()
         if not rules.enabled:
@@ -318,48 +429,113 @@ class SongQueue:
 
         video_id = parse_video_id(text)
         if video_id is None:
-            return None, "that isn't a YouTube link"
+            return await self._request_by_search(text, user, user_id, message_id, rules)
+
         if video_id in rules.blocklist:
             return None, "that song isn't allowed here"
         if reason := self._room_for(rules, video_id, user_id):
             return None, reason
+        api_key = self._api_key()
+        if not api_key:
+            return None, "song requests are unavailable right now"
 
+        infos, reason = await lookup([video_id], api_key)
+        if reason:
+            return None, reason
+        if not infos:
+            # Private, deleted, or a well-formed id that was never a video.
+            # All the same to a viewer.
+            return None, "couldn't find that video (private or removed?)"
+        if reason := self._refusal(infos[0], rules):
+            return None, reason
+        return await self._add(infos[0], user, user_id, message_id)
+
+    async def _request_by_search(
+        self,
+        text: str,
+        user: str,
+        user_id: str,
+        message_id: str | None,
+        rules: SongRules,
+    ) -> tuple[SongRequest | None, str | None]:
+        """`!sr <title and/or artist>`. 100 quota units, so guarded hard.
+
+        Every free check runs before the search: a request that would be
+        refused anyway must not spend a hundredth of the day's quota first.
+        """
+        if not rules.search_enabled:
+            return None, "that isn't a YouTube link"
+        # Collapse whitespace and cap the length: it's viewer text going into
+        # a URL, and nobody's song name needs more than this.
+        query = " ".join(text.split())[:100]
+        if not query:
+            return None, "that isn't a YouTube link"
+        if reason := self._room_for(rules, None, user_id):
+            return None, reason
+        api_key = self._api_key()
+        if not api_key:
+            return None, "song requests are unavailable right now"
+
+        # The budget protects links as much as searches: links share the same
+        # daily quota, so one viewer spamming searches could otherwise leave
+        # nobody able to request anything until Google's midnight reset.
+        if self.search_day != self._quota_day():
+            self.search_day, self.searches_used = self._quota_day(), 0
+        if self.searches_used >= rules.search_daily_budget:
+            return None, "song search is used up for today, but links still work"
+        since = time.monotonic() - self._searched.get(user_id, float("-inf"))
+        if since < rules.search_cooldown_s:
+            wait = int(rules.search_cooldown_s - since) + 1
+            return None, f"you can search again in {wait}s (links work anytime)"
+
+        # Spent the moment we ask: Google charges for the call whether or not
+        # anything playable comes back.
+        self.searches_used += 1
+        self._searched[user_id] = time.monotonic()
+        await self._changed()  # saves the count, and the dashboard shows it
+
+        ids, reason = await search(query, api_key)
+        if reason:
+            return None, reason
+        if not ids:
+            return None, f"no results for {query!r}"
+        infos, reason = await lookup(ids, api_key)
+        if reason:
+            return None, reason
+        queued = {r.video_id for r in self._all()}
+        for info in infos:
+            if info.video_id not in queued and not self._refusal(info, rules):
+                return await self._add(info, user, user_id, message_id)
+        if any(info.video_id in queued for info in infos):
+            return None, "that song is already in the queue"
+        return None, f"couldn't find a playable match for {query!r}, try a link"
+
+    @staticmethod
+    def _api_key() -> str | None:
         # Read at call time, not import time: main.py loads .env after
         # importing this module. Without a key we refuse rather than queue
         # unchecked -- unchecked means no length cap and no embeddable check,
         # which is how a three-hour video ends up on stream.
-        api_key = os.getenv("YOUTUBE_API_KEY")
-        if not api_key:
+        key = os.getenv("YOUTUBE_API_KEY")
+        if not key:
             print("[songs] YOUTUBE_API_KEY not set in backend/.env — refusing requests.")
-            return None, "song requests are unavailable right now"
+        return key
 
-        info, reason = await lookup(video_id, api_key)
-        if info is None:
-            return None, reason
-        if info.live:
-            return None, "live streams can't be requested"
-        if not info.embeddable:
-            return None, "that video can't be played outside YouTube"
-        if info.channel_id in rules.blocklist:
-            return None, "songs from that channel aren't allowed here"
-        if info.duration_s <= 0:
-            return None, "couldn't tell how long that video is"
-        if info.duration_s > rules.max_duration_s:
-            return None, (
-                f"that's {_fmt_duration(info.duration_s)} long, "
-                f"the limit is {_fmt_duration(rules.max_duration_s)}"
-            )
+    async def _add(
+        self, info: VideoInfo, user: str, user_id: str, message_id: str | None
+    ) -> tuple[SongRequest | None, str | None]:
+        """Queue a video that has passed every check. Shared by link and search."""
         # Second pass: the world may have moved while we awaited YouTube.
         # Rules re-read too, in case requests were closed meanwhile.
         rules = self._get_rules()
         if not rules.enabled:
             return None, "song requests are closed right now"
-        if reason := self._room_for(rules, video_id, user_id):
+        if reason := self._room_for(rules, info.video_id, user_id):
             return None, reason
 
         req = SongRequest(
             request_id=uuid.uuid4().hex,
-            video_id=video_id,
+            video_id=info.video_id,
             title=info.title,
             channel=info.channel,
             channel_id=info.channel_id,
@@ -370,7 +546,7 @@ class SongQueue:
             message_id=message_id,
         )
         # Nothing playing? It goes straight on. Actually *playing* it is the
-        # overlay's job (13b); the queue only decides what should be on.
+        # overlay's job; the queue only decides what should be on.
         if self.now is None:
             self._promote(req)
         else:

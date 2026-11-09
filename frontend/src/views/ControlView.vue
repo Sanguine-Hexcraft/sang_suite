@@ -317,7 +317,7 @@ async function songCall(path: string, init: RequestInit = { method: 'POST' }) {
   }
 }
 
-function songSettings(change: { enabled?: boolean; volume?: number }) {
+function songSettings(change: { enabled?: boolean; volume?: number; search_enabled?: boolean }) {
   return songCall('/api/songs/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -758,6 +758,25 @@ function accentFor(kind?: string) {
           </label>
         </div>
 
+        <div class="row">
+          <!-- One-way bound, like the OBS source checkboxes: the box shows
+               what the backend confirmed, not what was clicked. -->
+          <label class="check">
+            <input
+              type="checkbox"
+              :checked="store.config?.songs?.search_enabled"
+              @change="songSettings({ search_enabled: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>Allow search</span>
+          </label>
+          <!-- Each search is 100 of the day's 10,000 quota units, against 1
+               for a link; the budget resets at midnight Pacific with Google's. -->
+          <span class="hint">
+            searches today: {{ store.songs?.searches?.used ?? 0 }} /
+            {{ store.config?.songs?.search_daily_budget ?? '…' }}
+          </span>
+        </div>
+
         <div class="now-playing">
           <template v-if="store.songs?.now">
             <span class="np-label">{{ store.songs.paused ? 'PAUSED' : 'NOW PLAYING' }}</span>
@@ -799,7 +818,7 @@ function accentFor(kind?: string) {
 
         <label class="field">
           <span>Request a song</span>
-          <input v-model="songLink" placeholder="youtube link" @keyup.enter="requestSong" />
+          <input v-model="songLink" placeholder="youtube link or song name" @keyup.enter="requestSong" />
         </label>
         <p class="status">
           {{ songStatus || 'Song overlay: localhost:8000/overlay/song' }}
