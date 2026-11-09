@@ -19,7 +19,7 @@ Phase  9   Event delivery you can trust      DONE  ← infrastructure everything
 Phase 10   Channel point redeems             DONE  ← new event source
 Phase 11   The media overlay                 DONE  ← new output surface
 Phase 12   The bot speaks                    DONE  ← new identity
-Phase 13   Song requests                     13a   ← chat becomes an input
+Phase 13   Song requests                     DONE  ← chat becomes an input
 Phase 14   M&M death counter                 DONE  ← (built out of order; see README)
 Phase 15   Loot boxes                              ← composition of all of the above
 ```
@@ -318,6 +318,10 @@ Keep `twitch.py` ignorant of songs. Inject a single `on_chat` callback the way `
 ### 13d — The dashboard
 
 A Song Requests card in `/control`. Requests open/closed toggle, the now-playing song, the queue with remove buttons, skip, and a volume slider (`player.setVolume`, broadcast to the overlay; the OBS fader still sits on top). It's ordinary work at this point; nothing new is learned here, which is why it's last.
+
+**13d done 2026-11-09.** Open/close and volume go through their own `POST /api/songs/settings`, not the config PUT: the settings tab saves a draft cloned at page load, which would have undone them. That Save now sends only `alerts`. Opening or closing requests is announced in chat.
+
+**Next: text search** (`!sr <title and/or artist>`). `search.list` costs 100 units against 1 for a link, so it needs a daily search budget and a per-viewer cooldown, and every free check runs before it. It takes the top 5 results and checks them all in one `videos.list` call, because the top hit for a famous song is often a label video that blocks embedding.
 
 ---
 

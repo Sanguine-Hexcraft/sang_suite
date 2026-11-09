@@ -88,12 +88,24 @@ export interface SongRequest {
   requested_at: number
 }
 
+// A song that has left "now playing", for the dashboard's history list.
+// played = finished on its own; skipped = the dashboard, !skip or a mod;
+// failed = YouTube refused it or it stalled (`detail` says which); removed =
+// !wrongsong, the card's remove button or a mod deleting the !sr.
+export interface PlayedSong extends SongRequest {
+  started_at: number | null
+  ended_at: number
+  outcome: 'played' | 'skipped' | 'failed' | 'removed'
+  detail: string | null
+}
+
 // The queue as GET /api/songs returns it and `type: 'songs'` pushes carry it.
 // The backend owns it; the overlay only follows `now` and `paused`.
 export interface SongState {
   now: SongRequest | null
   queue: SongRequest[]
   paused: boolean
+  history: PlayedSong[] // newest first, capped at 50 by the backend
 }
 
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
@@ -109,6 +121,16 @@ export interface AppConfig {
     duration_ms: number
     volume: number // 0–1, peak gain of the alert jingle
     kinds: Record<string, AlertKindConfig>
+  }
+  // Song request rules (Phase 13), SongConfig in main.py.
+  songs: {
+    enabled: boolean
+    max_duration_s: number
+    max_queue: number
+    per_user_limit: number
+    who: 'everyone' | 'subs' | 'vip_mod'
+    blocklist: string[]
+    volume: number // 0-100, the player's own volume
   }
 }
 

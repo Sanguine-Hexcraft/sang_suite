@@ -33,6 +33,10 @@ import httpx
 
 SONGS_PATH = Path(__file__).with_name("songs.json")
 
+# Played songs kept for the dashboard's history list. They ride along on every
+# `songs` broadcast, so this is a cap on message size as much as on the list.
+HISTORY_LIMIT = 50
+
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
 
@@ -170,6 +174,8 @@ class SongRequest:
     # can pull the request. None for dashboard requests. Defaulted so a
     # songs.json saved before this field still loads.
     message_id: str | None = None
+    # When it became `now` (ms). Set on promotion, None while waiting.
+    started_at: int | None = None
 
 
 class SongRules(Protocol):
@@ -219,6 +225,10 @@ class SongQueue:
         # come back paused, not start blaring the song again. Saved for the
         # same reason across a restart.
         self.paused = False
+        # Songs that have left `now`, newest first, each a SongRequest dict
+        # plus `ended_at`, `outcome` and `detail`. Kept as plain dicts: it's a
+        # record, nothing ever acts on it again.
+        self.history: list[dict] = []
         self._load()
 
     # --- persistence --------------------------------------------------------
@@ -235,9 +245,10 @@ class SongQueue:
             self.now = SongRequest(**saved["now"]) if saved.get("now") else None
             self.queue = [SongRequest(**r) for r in saved.get("queue", [])]
             self.paused = bool(saved.get("paused", False))
+            self.history = list(saved.get("history", []))[:HISTORY_LIMIT]
         except (ValueError, OSError, KeyError, TypeError) as exc:
             print(f"[songs] {SONGS_PATH.name} unusable, starting empty: {exc}")
-            self.now, self.queue, self.paused = None, [], False
+            self.now, self.queue, self.paused, self.history = None, [], False, []
 
     def _save(self) -> None:
         try:
@@ -264,6 +275,7 @@ class SongQueue:
             "now": asdict(self.now) if self.now else None,
             "queue": [asdict(r) for r in self.queue],
             "paused": self.paused,
+            "history": self.history,
         }
 
     # --- requests -----------------------------------------------------------
@@ -360,7 +372,7 @@ class SongQueue:
         # Nothing playing? It goes straight on. Actually *playing* it is the
         # overlay's job (13b); the queue only decides what should be on.
         if self.now is None:
-            self.now = req
+            self._promote(req)
         else:
             self.queue.append(req)
         await self._changed()
@@ -374,9 +386,30 @@ class SongQueue:
         return None
 
     # --- control --------------------------------------------------------------
-    async def skip(self) -> SongRequest | None:
-        """Drop what's playing and promote the next song. Returns the new `now`."""
-        self.now = self.queue.pop(0) if self.queue else None
+    def _promote(self, req: SongRequest | None) -> None:
+        if req is not None:
+            req.started_at = int(time.time() * 1000)
+        self.now = req
+
+    async def skip(
+        self, outcome: str = "skipped", detail: str | None = None
+    ) -> SongRequest | None:
+        """Drop what's playing and promote the next song. Returns the new `now`.
+
+        Every way a song leaves `now` comes through here -- it finished,
+        someone skipped it, YouTube refused it, it was removed -- which makes
+        this the one place to write the history. `outcome` is one of
+        played / skipped / failed / removed; `detail` says why it failed.
+        """
+        if self.now is not None:
+            entry = {
+                **asdict(self.now),
+                "ended_at": int(time.time() * 1000),
+                "outcome": outcome,
+                "detail": detail,
+            }
+            self.history = [entry, *self.history][:HISTORY_LIMIT]
+        self._promote(self.queue.pop(0) if self.queue else None)
         await self._changed()
         return self.now
 
@@ -395,7 +428,9 @@ class SongQueue:
             # An embed refusal or a stall. Worth a line in the terminal: a
             # pattern of 150s from one label tells you what to blocklist.
             print(f"[songs] skipped {self.now.title!r} ({self.now.video_id}): {reason}")
-        await self.skip()
+            await self.skip("failed", reason)
+        else:
+            await self.skip("played")
         return True
 
     async def set_paused(self, paused: bool) -> None:
@@ -419,7 +454,7 @@ class SongQueue:
     async def remove(self, request_id: str) -> bool:
         """Remove one request, wherever it is. Removing `now` is a skip."""
         if self.now and self.now.request_id == request_id:
-            await self.skip()
+            await self.skip("removed")
             return True
         before = len(self.queue)
         self.queue = [r for r in self.queue if r.request_id != request_id]

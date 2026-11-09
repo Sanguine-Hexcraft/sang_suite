@@ -605,7 +605,7 @@ Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roa
 - [x] **Phase 12**: the bot speaks, posting to chat as its own account
 - [x] **Phase 14**: the M&M death counter, read from the game's Ledger
 - [x] **M&M, continued**: Ledger history in SQLite, level-up alerts, the zone banner
-- [ ] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay). Queue, player and chat commands done; the dashboard card (13d) remains
+- [x] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay, run from a dashboard card)
 - [ ] **Phase 15**: loot boxes
 
 ### Known gaps

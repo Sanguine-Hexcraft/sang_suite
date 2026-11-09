@@ -138,6 +138,10 @@ class SongConfig(BaseModel):
     per_user_limit: int = Field(default=1, ge=1, le=20)
     # Who may request. Stored now; enforced in 13c, once chat badges exist.
     who: Literal["everyone", "subs", "vip_mod"] = "everyone"
+    # Player volume, 0-100, set from the dashboard's slider. The OBS fader
+    # still sits on top of it; this is for balancing songs against the game
+    # without leaving the dashboard.
+    volume: int = Field(default=50, ge=0, le=100)
     # Video ids and channel ids in one list -- they can't collide (channel ids
     # are 24 characters starting UC, video ids 11).
     blocklist: list[str] = []
@@ -672,6 +676,45 @@ async def song_ended(body: SongEndedBody):
     """
     advanced = await song_queue.ended(body.request_id, body.reason)
     return {"advanced": advanced}
+
+
+class SongSettingsBody(BaseModel):
+    # Both optional: the dashboard sends one at a time.
+    enabled: bool | None = None
+    volume: int | None = Field(default=None, ge=0, le=100)
+
+
+@app.post("/api/songs/settings")
+async def song_settings(body: SongSettingsBody):
+    """Open/close requests or set the volume, without a whole-config PUT.
+
+    Its own endpoint because the settings tab saves a draft of the *entire*
+    config, cloned when the page loaded; routing these through it would let
+    a later colour tweak quietly undo an open/close made since. Like
+    PUT /api/config it saves and broadcasts, so the overlay hears the volume.
+    """
+    global config
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        return config.songs
+    was_open = config.songs.enabled
+    # Copied, not mutated in place, the same way PUT /api/config replaces the
+    # model: nothing holding the old one sees it change underneath it.
+    config = config.model_copy(update={"songs": config.songs.model_copy(update=changes)})
+    save_config(config)
+    await manager.broadcast({"type": "config", "config": config.model_dump()})
+    # Announced in chat, because viewers can't see your dashboard: otherwise
+    # the first anyone hears of a change is their `!sr` being refused.
+    if config.songs.enabled != was_open and chat_bot.ready:
+        text = (
+            "song requests are open! !sr <youtube link>"
+            if config.songs.enabled
+            else "song requests are closed"
+        )
+        sent, reason = await chat_bot.send(text)
+        if not sent:
+            print(f"[songs] couldn't announce the change in chat: {reason}")
+    return config.songs
 
 
 @app.post("/api/songs/pause")

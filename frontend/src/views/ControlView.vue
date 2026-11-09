@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
-import { useOverlayStore, type AppConfig, type DeathEvent, type MediaEvent, type ZoneEvent } from '@/stores/overlay'
+import {
+  useOverlayStore,
+  type AppConfig,
+  type DeathEvent,
+  type MediaEvent,
+  type PlayedSong,
+  type ZoneEvent,
+} from '@/stores/overlay'
 import { playSound, SOUND_NAMES } from '@/audio/sounds'
 
 // store: the shared Pinia store instance. useOverlayStore is
@@ -13,7 +20,7 @@ const store = useOverlayStore()
 // Plain state rather than separate routes: the settings tab shares the draft,
 // save logic and store with everything else here. Paired with v-show (not
 // v-if) in the template, so switching tabs mid-edit keeps an unsaved draft.
-type Tab = 'live' | 'settings'
+type Tab = 'live' | 'songs' | 'settings'
 const tab = ref<Tab>('live')
 
 // --- backend health -----------------------------------------------------
@@ -51,9 +58,19 @@ onMounted(async () => {
   // doesn't blank it.
   void store.loadActivity()
   void store.loadDeaths()
+  void store.loadSongs()
   await store.loadConfig()
   draft.value = structuredClone(toRaw(store.config))
 })
+
+// The song queue is state, never replayed over /ws, so a backend restart or a
+// dropped socket would otherwise leave the card showing a stale queue.
+watch(
+  () => store.connected,
+  (up) => {
+    if (up) void store.loadSongs()
+  },
+)
 
 // Intervals outlive the component unless you say otherwise, and would keep
 // polling (and writing to a dead ref) after navigating away.
@@ -81,12 +98,18 @@ const draft = ref<AppConfig | null>(null)
 const configStatus = ref('')
 
 async function saveConfig() {
+  if (!draft.value || !store.config) return
   configStatus.value = 'saving…'
+  // Only the alerts section comes from the draft. The rest is taken from the
+  // store, which config broadcasts keep current. The draft was cloned when the
+  // page loaded, so sending it whole would quietly undo anything changed
+  // since -- like opening song requests from the Song Requests card.
+  const body = { ...toRaw(store.config), alerts: draft.value.alerts }
   try {
     const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(draft.value),
+      body: JSON.stringify(body),
     })
     const data = await res.json()
     configStatus.value = res.ok ? 'saved' : `error: ${JSON.stringify(data.detail)}`
@@ -259,6 +282,78 @@ async function chatBurst() {
   setTimeout(() => (chatStatus.value = ''), 8000)
 }
 
+// --- song requests (Phase 13d) ---------------------------------------------
+// The queue lives on the backend. Every button here just asks for a change;
+// the backend broadcasts the new state, and store.songs (which this card
+// renders) follows it -- the same way the overlay does. So the card can never
+// show a queue the overlay disagrees with.
+const songStatus = ref('')
+const songLink = ref('')
+const songVolume = ref(50)
+
+// The slider is a local copy, synced from config whenever config changes,
+// so dragging it isn't fighting a value being rewritten under it.
+watch(
+  () => store.config?.songs?.volume,
+  (v) => {
+    if (typeof v === 'number') songVolume.value = v
+  },
+  { immediate: true },
+)
+
+async function songCall(path: string, init: RequestInit = { method: 'POST' }) {
+  songStatus.value = ''
+  try {
+    const res = await fetch(path, init)
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      songStatus.value = typeof body.detail === 'string' ? body.detail : `error: ${res.status}`
+      return false
+    }
+    return true
+  } catch (e) {
+    songStatus.value = `network error: ${e}`
+    return false
+  }
+}
+
+function songSettings(change: { enabled?: boolean; volume?: number }) {
+  return songCall('/api/songs/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(change),
+  })
+}
+
+// Runs the same code as `!sr`, as you: handy for queueing your own song.
+async function requestSong() {
+  const text = songLink.value.trim()
+  if (!text) return
+  const ok = await songCall('/api/songs/request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, user: 'broadcaster' }),
+  })
+  if (ok) songLink.value = ''
+}
+
+function removeSong(requestId: string) {
+  void songCall(`/api/songs/${encodeURIComponent(requestId)}`, { method: 'DELETE' })
+}
+
+// Tag colours for the Played list, from the dashboard's own palette: green
+// finished, dim skipped, red failed, orange removed.
+const outcomeColor: Record<PlayedSong['outcome'], string> = {
+  played: '#50fa7b',
+  skipped: '#6272a4',
+  failed: '#ff5555',
+  removed: '#ffb86c',
+}
+
+function duration(seconds: number) {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
 // --- death counter (Phase 14) ------------------------------------------
 // The count itself comes from the game's Ledger on the backend; these only
 // move the session's start or nudge the total. Each POST is answered with the
@@ -428,6 +523,7 @@ function accentFor(kind?: string) {
       <h1>SANG SUITE</h1>
       <nav class="tabs">
         <button :class="{ active: tab === 'live' }" @click="tab = 'live'">Live</button>
+        <button :class="{ active: tab === 'songs' }" @click="tab = 'songs'">Song Requests</button>
         <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">Alert Settings</button>
       </nav>
       <div class="pills">
@@ -631,6 +727,117 @@ function accentFor(kind?: string) {
       </section>
     </div>
 
+    <div v-show="tab === 'songs'" class="grid">
+      <section class="card songs-card">
+        <h2>
+          Song Requests
+          <span class="status inline" :class="store.config?.songs?.enabled ? 'open' : 'closed'">
+            {{ store.config?.songs?.enabled ? 'open' : 'closed' }}
+          </span>
+        </h2>
+        <div class="row">
+          <!-- Announced in chat by the bot when it changes. -->
+          <button
+            class="primary"
+            @click="songSettings({ enabled: !store.config?.songs?.enabled })"
+          >
+            {{ store.config?.songs?.enabled ? 'Close requests' : 'Open requests' }}
+          </button>
+          <label class="field grow">
+            <span>Volume — {{ songVolume }}%</span>
+            <!-- Saved on release (change), not on every pixel of the drag
+                 (input), which would write config.json dozens of times. -->
+            <input
+              v-model.number="songVolume"
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              @change="songSettings({ volume: songVolume })"
+            />
+          </label>
+        </div>
+
+        <div class="now-playing">
+          <template v-if="store.songs?.now">
+            <span class="np-label">{{ store.songs.paused ? 'PAUSED' : 'NOW PLAYING' }}</span>
+            <!-- Viewer-chosen text: interpolation only, never v-html. -->
+            <a
+              class="np-title"
+              :href="`https://youtu.be/${store.songs.now.video_id}`"
+              target="_blank"
+              rel="noopener"
+            >{{ store.songs.now.title }}</a>
+            <span class="hint">
+              {{ store.songs.now.channel }} · {{ duration(store.songs.now.duration_s) }} ·
+              requested by {{ store.songs.now.user }}
+            </span>
+          </template>
+          <span v-else class="hint">Nothing playing.</span>
+        </div>
+
+        <div class="row">
+          <button
+            v-if="store.songs?.paused"
+            class="primary"
+            @click="songCall('/api/songs/resume')"
+          >
+            Resume
+          </button>
+          <button v-else @click="songCall('/api/songs/pause')">Pause</button>
+          <button :disabled="!store.songs?.now" @click="songCall('/api/songs/skip')">Skip</button>
+        </div>
+
+        <ol v-if="store.songs?.queue.length" class="song-queue">
+          <li v-for="song in store.songs.queue" :key="song.request_id">
+            <span class="sq-title" :title="song.title">{{ song.title }}</span>
+            <span class="sq-meta">{{ song.user }} · {{ duration(song.duration_s) }}</span>
+            <button class="icon" title="Remove" @click="removeSong(song.request_id)">✕</button>
+          </li>
+        </ol>
+        <p v-else class="hint">Queue is empty.</p>
+
+        <label class="field">
+          <span>Request a song</span>
+          <input v-model="songLink" placeholder="youtube link" @keyup.enter="requestSong" />
+        </label>
+        <p class="status">
+          {{ songStatus || 'Song overlay: localhost:8000/overlay/song' }}
+        </p>
+      </section>
+
+      <section class="card wide">
+        <h2>
+          Played
+          <span class="status inline">{{ store.songs?.history.length ?? 0 }} song(s)</span>
+        </h2>
+        <p v-if="!store.songs?.history.length" class="status">
+          Nothing played yet. Songs land here once they leave "now playing".
+        </p>
+        <!-- Same markup and styling as the activity feed: time, tag, text,
+             and a dim right-hand column. -->
+        <ul class="feed">
+          <li v-for="song in store.songs?.history" :key="song.request_id">
+            <span class="time">{{ clockTime(song.started_at ?? song.ended_at) }}</span>
+            <span
+              class="tag"
+              :style="{ color: outcomeColor[song.outcome], borderColor: outcomeColor[song.outcome] }"
+              :title="song.detail ?? ''"
+            >
+              {{ song.outcome }}
+            </span>
+            <span class="text">
+              <a class="np-title" :href="`https://youtu.be/${song.video_id}`" target="_blank" rel="noopener">{{
+                song.title
+              }}</a>
+              <span class="sq-meta">requested by {{ song.user }}</span>
+            </span>
+            <span class="amount">{{ duration(song.duration_s) }}</span>
+          </li>
+        </ul>
+      </section>
+    </div>
+
     <div v-show="tab === 'settings'" class="grid">
       <section class="card wide" v-if="draft">
         <h2>
@@ -802,6 +1009,76 @@ function accentFor(kind?: string) {
   letter-spacing: 0.25em;
   color: var(--dim);
   text-transform: uppercase;
+}
+
+/* --- song requests ---------------------------------------------------- */
+.status.open {
+  color: var(--up);
+}
+.status.closed {
+  color: var(--down);
+}
+
+.now-playing {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.np-label {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+}
+
+.np-title {
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.np-title:hover {
+  text-decoration: underline;
+}
+
+/* Numbered by the <ol> itself, so the numbers always match `!queue`'s. Capped
+   in height so a long queue scrolls inside the card instead of stretching
+   the whole grid row. */
+.song-queue {
+  margin: 0;
+  padding-left: 22px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.song-queue li {
+  padding: 3px 0;
+}
+
+/* Plain inline layout, not flex or grid, on the <li>: making it a flex box
+   would drop its list marker, and the numbers are the point. */
+.song-queue li > * {
+  vertical-align: middle;
+}
+
+.sq-title {
+  display: inline-block;
+  max-width: 60%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sq-meta {
+  margin-left: 8px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.song-queue .icon {
+  float: right;
+  padding: 0 6px;
 }
 
 /* Label/value pairs for the watcher status: a two-column grid keeps the

@@ -14,6 +14,10 @@ import { loadYouTube, PlayerState, type YTPlayer } from '@/lib/youtube'
 
 const store = useOverlayStore()
 
+// The dashboard's slider, 0-100. Config rides the relay, so a slider drag
+// reaches the player live.
+const volume = computed(() => store.config?.songs?.volume ?? 50)
+
 const now = computed(() => store.songs?.now ?? null)
 // The card shows only while music is actually meant to be audible, so it can
 // never claim a song is playing during a pause.
@@ -195,6 +199,7 @@ async function createPlayer() {
       events: {
         onReady: () => {
           ready = true
+          player?.setVolume(volume.value)
           sync()
         },
         onStateChange,
@@ -212,6 +217,10 @@ async function createPlayer() {
 // The backend's state replaces store.songs wholesale on every push, so a
 // shallow watch sees every change.
 watch(() => store.songs, sync)
+
+watch(volume, (v) => {
+  if (ready) player?.setVolume(v)
+})
 
 // State is never replayed, so catch up on every (re)connect instead.
 watch(
@@ -232,6 +241,7 @@ watch(
 
 onMounted(() => {
   store.connect()
+  void store.loadConfig()
   void store.loadSongs()
   void createPlayer()
   pollTimer = setInterval(poll, POLL_MS)
@@ -294,11 +304,15 @@ body {
 .card {
   /* Same "r g b" triple trick as the alert card, in the redeem teal. */
   --accent: 61 220 151;
-  width: 356px;
+  --border: 3px;
+  /* base.css makes every element border-box, so a width here *includes* the
+     border. Set to exactly 356px, the card had 350px inside for a 356px
+     player, which then stuck out past the frame. */
+  width: calc(356px + 2 * var(--border));
   font-family: 'Departure Mono', ui-monospace, monospace;
   color: #f2eefa;
   background: rgb(9 7 12 / 0.85);
-  border: 3px solid rgb(var(--accent));
+  border: var(--border) solid rgb(var(--accent));
   box-shadow: 0 0 28px rgb(var(--accent) / 0.35);
 }
 
@@ -306,6 +320,16 @@ body {
   width: 356px;
   height: 200px;
   background: #000;
+}
+
+/* The iframe is made by YouTube's script, not by this template, so it has no
+   scoped-style attribute: :deep() is how a scoped rule reaches it. Block, not
+   the default inline, or it sits on a text baseline and gains a few pixels of
+   gap underneath -- which is enough to overflow the 200px frame. */
+.player :deep(iframe) {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .info {
