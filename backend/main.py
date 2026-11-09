@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import simpleobsws
@@ -20,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from chat import ChatBot
 from ledger import LedgerIngester
 from mnm import DeathWatcher
+from songs import SongQueue
 from twitch import TwitchAlerts
 from zones import ZoneWatcher
 
@@ -122,8 +124,30 @@ class RewardConfig(BaseModel):
     interrupt: bool = False
 
 
+class SongConfig(BaseModel):
+    """Song request rules (Phase 13). Read by songs.py through a callable."""
+
+    # Off by default: copyrighted music on stream can mute the VOD or earn a
+    # DMCA strike, so requests are something you opt into, per stream.
+    enabled: bool = False
+    # Six minutes covers nearly every real song and refuses the hour-long mix.
+    max_duration_s: int = Field(default=360, ge=30, le=3600)
+    max_queue: int = Field(default=20, ge=1, le=200)
+    # Songs one viewer may have *waiting* at once (the playing one doesn't count).
+    per_user_limit: int = Field(default=1, ge=1, le=20)
+    # Who may request. Stored now; enforced in 13c, once chat badges exist.
+    who: Literal["everyone", "subs", "vip_mod"] = "everyone"
+    # Video ids and channel ids in one list -- they can't collide (channel ids
+    # are 24 characters starting UC, video ids 11).
+    blocklist: list[str] = []
+
+
 class Config(BaseModel):
     alerts: AlertConfig = AlertConfig()
+    # A new top-level key, so an existing config.json without it still loads
+    # and gets these defaults -- unlike adding to `kinds`, which the file
+    # replaces wholesale.
+    songs: SongConfig = SongConfig()
     # Empty by default: a fresh install alerts on nothing until you add ids.
     rewards: dict[str, RewardConfig] = {}
 
@@ -462,7 +486,9 @@ class ConnectionManager:
         # A `test` death is a preview of the flare: replaying one after a
         # reconnect would put a fake +1 and a bell on air, and saving it would
         # leave "Test death" rows in the feed for good.
-        if message.get("type") not in ("config", "panic", "deaths") and not message.get("test"):
+        # `songs` (the request queue) is state too: the song overlay asks
+        # GET /api/songs on connect rather than replaying stale queue snapshots.
+        if message.get("type") not in ("config", "panic", "deaths", "songs") and not message.get("test"):
             self._seq += 1
             # `at` is stamped here rather than in the browser so a restored row
             # shows when the event happened, not when the page loaded it.
@@ -503,6 +529,9 @@ death_watcher = DeathWatcher(manager.broadcast)
 ledger_ingester = LedgerIngester(manager.broadcast)
 zone_watcher = ZoneWatcher(manager.broadcast)
 chat_bot = ChatBot()
+# A lambda over the module-level `config`, not config.songs itself, so a save
+# from the dashboard takes effect on the very next request.
+song_queue = SongQueue(manager.broadcast, lambda: config.songs)
 
 
 @app.get("/api/health")
@@ -552,6 +581,50 @@ async def send_chat(req: ChatRequest):
     if not sent:
         status = 429 if reason == "rate limited" else 502
         raise HTTPException(status_code=status, detail=reason)
+    return {"ok": True}
+
+
+# --- song requests (Phase 13a) ----------------------------------------------
+class SongRequestBody(BaseModel):
+    # The raw text after `!sr`, exactly as chat will hand it over: a link, a
+    # bare id or garbage. songs.py decides which.
+    text: str = Field(min_length=1, max_length=500)
+    user: str = Field(default="dashboard", min_length=1, max_length=25)
+
+
+@app.get("/api/songs")
+async def get_songs():
+    """What's playing and what's waiting. The song overlay calls this on
+    connect instead of trusting replayed broadcasts."""
+    return song_queue.state()
+
+
+@app.post("/api/songs/request")
+async def request_song(body: SongRequestBody):
+    """The test entry point: runs the same code `!sr` will in 13c.
+
+    The user id is derived from the name so you can test the per-user limit
+    as several pretend viewers. Real chat ids are numeric, so these can never
+    collide with one.
+    """
+    req, reason = await song_queue.request(
+        body.text, body.user, f"dashboard:{body.user.lower()}"
+    )
+    if req is None:
+        raise HTTPException(status_code=422, detail=reason)
+    return {"request": req, "position": song_queue.position(req.request_id)}
+
+
+@app.post("/api/songs/skip")
+async def skip_song():
+    now = await song_queue.skip()
+    return {"now": now}
+
+
+@app.delete("/api/songs/{request_id}")
+async def remove_song(request_id: str):
+    if not await song_queue.remove(request_id):
+        raise HTTPException(status_code=404, detail="no such request")
     return {"ok": True}
 
 

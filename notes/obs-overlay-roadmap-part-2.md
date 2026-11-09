@@ -19,7 +19,7 @@ Phase  9   Event delivery you can trust      DONE  ← infrastructure everything
 Phase 10   Channel point redeems             DONE  ← new event source
 Phase 11   The media overlay                 DONE  ← new output surface
 Phase 12   The bot speaks                    DONE  ← new identity
-Phase 13   Song requests                           ← chat becomes an input
+Phase 13   Song requests                     13a   ← chat becomes an input
 Phase 14   M&M death counter                 DONE  ← (built out of order; see README)
 Phase 15   Loot boxes                              ← composition of all of the above
 ```
@@ -254,6 +254,14 @@ The API key goes in `.env` as `YOUTUBE_API_KEY`. It's a plain key, not OAuth, so
 - `blocklist`, a list of video ids and channel ids.
 
 **Checkpoint:** from `/control`, request a normal song, a 40-minute video, an embedding-disabled video and garbage text. The first queues, the other three are refused with a reason, and the queue survives a backend restart.
+
+**13a done 2026-11-05.** What differed from the plan above:
+- The dashboard test endpoint derives `user_id` from the name you type (`dashboard:<name>`), so the per-user limit can be tested as several pretend viewers.
+- `per_user_limit` counts songs *waiting*, not the one playing.
+- The same video can't be queued twice at once.
+- The queue checks run a second time after the lookup, because two requests awaiting YouTube at once could otherwise both take the last slot.
+- `who` is stored but not enforced until 13c brings badges.
+- Endpoints: `GET /api/songs`, `POST /api/songs/request`, `POST /api/songs/skip`, `DELETE /api/songs/{request_id}`.
 
 ### 13b — The player overlay
 

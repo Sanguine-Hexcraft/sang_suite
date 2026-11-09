@@ -73,3 +73,8 @@ backend/deaths.json
 # game's files if deleted -- except for anything the game has since pruned.
 backend/ledger.db
 backend/ledger.db-journal
+
+# Song request queue (Phase 13): who asked for what, saved so a restart
+# mid-stream doesn't lose the queue. Machine-local state.
+backend/songs.json
+backend/songs.json.tmp
