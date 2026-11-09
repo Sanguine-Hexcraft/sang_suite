@@ -113,8 +113,14 @@ class ChatBot:
             self._time_stamps.popleft()
         return len(self._time_stamps) >= RATE_LIMIT
 
-    async def send(self, text: str) -> tuple[bool, str | None]:
+    async def send(
+        self, text: str, reply_to: str | None = None
+    ) -> tuple[bool, str | None]:
         """Post `text` as the bot. Returns (sent, reason it wasn't).
+
+        `reply_to` is a chat message id: the message then shows as a threaded
+        reply to it, so in a busy chat the viewer can see which `!sr` it
+        answers.
 
         Over the limit, the message is dropped rather than queued: a greeting
         that posts four minutes late is worse than none at all.
@@ -130,7 +136,10 @@ class ChatBot:
         self._time_stamps.append(time.monotonic())
         try:
             res = await self._twitch.send_chat_message(
-                self._channel_user_id, self._bot_user_id, text
+                self._channel_user_id,
+                self._bot_user_id,
+                text,
+                reply_parent_message_id=reply_to,
             )
         except Exception as exc:
             return False, f"send failed: {exc}"

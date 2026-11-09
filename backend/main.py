@@ -19,10 +19,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from chat import ChatBot
+from commands import ChatCommands
 from ledger import LedgerIngester
 from mnm import DeathWatcher
 from songs import SongQueue
-from twitch import TwitchAlerts
+from twitch import ChatLine, TwitchAlerts
 from zones import ZoneWatcher
 
 
@@ -142,8 +143,27 @@ class SongConfig(BaseModel):
     blocklist: list[str] = []
 
 
+class ChatConfig(BaseModel):
+    """Chat reading (Phase 13c)."""
+
+    # Logins never acted on, lowercase. Our own bot is excluded by user id
+    # and doesn't need to be here. Loot boxes (Phase 15) reuse this list, so
+    # bots don't claim loot either.
+    bot_denylist: list[str] = [
+        "nightbot",
+        "streamelements",
+        "streamlabs",
+        "moobot",
+        "fossabot",
+        "wizebot",
+        "sery_bot",
+        "soundalerts",
+    ]
+
+
 class Config(BaseModel):
     alerts: AlertConfig = AlertConfig()
+    chat: ChatConfig = ChatConfig()
     # A new top-level key, so an existing config.json without it still loads
     # and gets these defaults -- unlike adding to `kinds`, which the file
     # replaces wholesale.
@@ -524,7 +544,14 @@ def _reward_lookup(reward_id: str) -> RewardConfig | None:
     return config.rewards.get(reward_id)
 
 
-twitch_alerts = TwitchAlerts(manager.broadcast, _reward_lookup)
+# The chat callbacks are lambdas because chat_commands is defined further down:
+# they look it up when a message arrives, by which time it exists.
+twitch_alerts = TwitchAlerts(
+    manager.broadcast,
+    _reward_lookup,
+    on_chat=lambda line: chat_commands.handle(line),
+    on_chat_delete=lambda message_id: chat_commands.handle_delete(message_id),
+)
 death_watcher = DeathWatcher(manager.broadcast)
 ledger_ingester = LedgerIngester(manager.broadcast)
 zone_watcher = ZoneWatcher(manager.broadcast)
@@ -532,6 +559,13 @@ chat_bot = ChatBot()
 # A lambda over the module-level `config`, not config.songs itself, so a save
 # from the dashboard takes effect on the very next request.
 song_queue = SongQueue(manager.broadcast, lambda: config.songs)
+chat_commands = ChatCommands(
+    song_queue,
+    chat_bot.send,
+    manager.broadcast,
+    lambda: config,
+    lambda: chat_bot.bot_user_id,
+)
 
 
 @app.get("/api/health")
@@ -663,6 +697,49 @@ async def remove_song(request_id: str):
     if not await song_queue.remove(request_id):
         raise HTTPException(status_code=404, detail="no such request")
     return {"ok": True}
+
+
+# --- chat commands (Phase 13c) ----------------------------------------------
+class ChatTestBody(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    user: str = Field(default="tester", min_length=1, max_length=25)
+    # Pretend badges, e.g. ["moderator"] to test !skip.
+    badges: list[str] = []
+
+
+@app.post("/api/chat/test")
+async def chat_test(body: ChatTestBody):
+    """Run a chat message through the real command dispatcher.
+
+    The bot's replies come back in the response instead of being posted, so
+    you can test every command without a second account and without spamming
+    your own chat. Side effects are real, though: `!sr` queues a song and
+    `!lurk` puts the gif on stream.
+    """
+    replies: list[str] = []
+
+    async def collect(text: str) -> None:
+        replies.append(text)
+
+    line = ChatLine(
+        # Unique, so a test !sr can be "deleted by a mod" via the endpoint
+        # below, using the id this returns.
+        message_id=f"test-{time.time_ns()}",
+        user_id=f"dashboard:{body.user.lower()}",
+        login=body.user.lower(),
+        name=body.user,
+        text=body.text,
+        badges=frozenset(body.badges),
+    )
+    await chat_commands.handle(line, reply=collect)
+    return {"message_id": line.message_id, "replies": replies}
+
+
+@app.post("/api/chat/test/delete/{message_id}")
+async def chat_test_delete(message_id: str):
+    """Pretend a mod deleted a chat message."""
+    await chat_commands.handle_delete(message_id)
+    return song_queue.state()
 
 
 # --- widget settings endpoints (Phase 8) ------------------------------------

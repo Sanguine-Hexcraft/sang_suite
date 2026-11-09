@@ -605,14 +605,13 @@ Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roa
 - [x] **Phase 12**: the bot speaks, posting to chat as its own account
 - [x] **Phase 14**: the M&M death counter, read from the game's Ledger
 - [x] **M&M, continued**: Ledger history in SQLite, level-up alerts, the zone banner
-- [ ] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay)
+- [ ] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay). Queue, player and chat commands done; the dashboard card (13d) remains
 - [ ] **Phase 15**: loot boxes
 
 ### Known gaps
 
 - Gift-sub gifter announcements, `stream.online`/`offline` and unsubs aren't subscribed yet. None of
   them needs a new OAuth scope.
-- The bot can send but not yet read chat, so there are no chat commands until Phase 13.
 - The OBS scene and source lists are a snapshot, not live. Press ⟳ after changing things in OBS
   itself.
 - No tests or linters in either half.

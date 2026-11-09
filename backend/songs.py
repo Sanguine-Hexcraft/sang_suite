@@ -166,6 +166,10 @@ class SongRequest:
     user: str
     user_id: str
     requested_at: int  # ms since epoch, like the activity feed's `at`
+    # The chat message that asked for it (13c), so a mod deleting that message
+    # can pull the request. None for dashboard requests. Defaulted so a
+    # songs.json saved before this field still loads.
+    message_id: str | None = None
 
 
 class SongRules(Protocol):
@@ -287,7 +291,7 @@ class SongQueue:
         return ([self.now] if self.now else []) + self.queue
 
     async def request(
-        self, text: str, user: str, user_id: str
+        self, text: str, user: str, user_id: str, message_id: str | None = None
     ) -> tuple[SongRequest | None, str | None]:
         """Try to queue `text` for `user`. Returns (request, None) or (None, reason).
 
@@ -351,6 +355,7 @@ class SongQueue:
             user=user,
             user_id=user_id,
             requested_at=int(time.time() * 1000),
+            message_id=message_id,
         )
         # Nothing playing? It goes straight on. Actually *playing* it is the
         # overlay's job (13b); the queue only decides what should be on.
@@ -398,6 +403,18 @@ class SongQueue:
             return
         self.paused = paused
         await self._changed()
+
+    def mine(self, user_id: str) -> list[SongRequest]:
+        """This viewer's requests, playing one first, then in queue order."""
+        return [r for r in self._all() if r.user_id == user_id]
+
+    async def remove_by_message(self, message_id: str) -> SongRequest | None:
+        """A mod deleted a chat message; pull the request it made, if any."""
+        for r in self._all():
+            if r.message_id == message_id:
+                await self.remove(r.request_id)
+                return r
+        return None
 
     async def remove(self, request_id: str) -> bool:
         """Remove one request, wherever it is. Removing `now` is a skip."""

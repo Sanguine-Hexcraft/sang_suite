@@ -311,6 +311,10 @@ Keep `twitch.py` ignorant of songs. Inject a single `on_chat` callback the way `
 - A mod deleting an `!sr` message removes that request.
 - Thirty rapid `!sr`s from different accounts all queue (up to `max_queue`), even though some replies get rate-limited.
 
+**13b done 2026-11-09.** Panic pauses the queue as saved state (`paused`), not just the player, so a reloaded source comes back silent; `POST /api/songs/resume` continues from the same spot. The stall check ignores a song that never started, because a normal browser tab blocks autoplay and would otherwise skip every song while OBS played them.
+
+**13c written 2026-11-09.** Commands live in `backend/commands.py`, not `main.py`. Shared Chat messages from other channels are ignored too. A `POST /api/chat/test` endpoint runs the dispatcher and returns the bot's replies instead of posting them. `!lurk` (lurky.gif, 10 min per-viewer cooldown) landed here as well.
+
 ### 13d — The dashboard
 
 A Song Requests card in `/control`. Requests open/closed toggle, the now-playing song, the queue with remove buttons, skip, and a volume slider (`player.setVolume`, broadcast to the overlay; the OBS fader still sits on top). It's ordinary work at this point; nothing new is learned here, which is why it's last.

@@ -11,6 +11,7 @@ so this module stays independent of FastAPI.
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -18,6 +19,8 @@ from twitchAPI.eventsub.websocket import EventSubWebsocket
 from twitchAPI.helper import first
 from twitchAPI.oauth import UserAuthenticationStorageHelper
 from twitchAPI.object.eventsub import (
+    ChannelChatMessageDeleteEvent,
+    ChannelChatMessageEvent,
     ChannelCheerEvent,
     ChannelFollowEvent,
     ChannelPointsCustomRewardRedemptionAddEvent,
@@ -40,7 +43,7 @@ SCOPES = [
     AuthScope.CHANNEL_READ_SUBSCRIPTIONS,  # subs, resubs
     AuthScope.BITS_READ,  # cheers
     AuthScope.CHANNEL_READ_REDEMPTIONS,  # channel point redeems (Phase 10)
-    AuthScope.USER_READ_CHAT,  # not used yet; see comment above
+    AuthScope.USER_READ_CHAT,  # chat commands (Phase 13c), loot boxes later
 ]
 
 # Where the user token + refresh token get cached, so you only authorize once.
@@ -55,6 +58,36 @@ AlertBroadcast = Callable[[dict], Awaitable[None]]
 RewardLookup = Callable[[str], "RewardConfig | None"]
 
 
+@dataclass
+class ChatLine:
+    """One chat message, with the twitchAPI types peeled off.
+
+    This module reads chat but doesn't know what any of it means: it hands
+    each line to an injected callback, and commands.py decides. Loot boxes
+    (Phase 15) will subscribe to that same callback rather than to Twitch a
+    second time.
+    """
+
+    message_id: str
+    # Every rule keys on user_id; login is for the bot denylist; name is only
+    # ever for display. Names change case and get changed outright.
+    user_id: str
+    login: str
+    name: str
+    text: str
+    # Badge set ids: "broadcaster", "moderator", "vip", "subscriber", ...
+    # Permissions come from these, not from extra Helix lookups.
+    badges: frozenset[str]
+    # Set when the message came from *another* channel in a Twitch Shared
+    # Chat session. Those viewers aren't yours, so commands ignore them.
+    source_channel_id: str | None = None
+
+
+ChatHandler = Callable[[ChatLine], Awaitable[None]]
+# Receives the id of a message a moderator deleted.
+ChatDeleteHandler = Callable[[str], Awaitable[None]]
+
+
 def _alert(kind: str, user: str, text: str, amount: int | None = None) -> dict:
     return {"type": "alert", "kind": kind, "user": user, "text": text, "amount": amount}
 
@@ -66,9 +99,17 @@ class TwitchAlerts:
     network), it says so and the rest of the backend carries on running.
     """
 
-    def __init__(self, broadcast: AlertBroadcast, reward_lookup: RewardLookup):
+    def __init__(
+        self,
+        broadcast: AlertBroadcast,
+        reward_lookup: RewardLookup,
+        on_chat: ChatHandler | None = None,
+        on_chat_delete: ChatDeleteHandler | None = None,
+    ):
         self._broadcast = broadcast
         self._reward_lookup = reward_lookup
+        self._on_chat_cb = on_chat
+        self._on_chat_delete_cb = on_chat_delete
         self._twitch: Twitch | None = None
         self._eventsub: EventSubWebsocket | None = None
 
@@ -139,6 +180,21 @@ class TwitchAlerts:
         raid_sub = await self._eventsub.listen_channel_raid(
             self._on_raid, to_broadcaster_user_id=uid
         )
+
+        # Chat (Phase 13c). Your id twice again: the channel to read, and the
+        # user to read it *as*. The scope came with Phase 10's batch, so no
+        # re-authorize. Guarded separately, because a failure here (the CLI
+        # mock doesn't do every subscription type) should cost chat commands,
+        # not follow and sub alerts.
+        if self._on_chat_cb is not None:
+            try:
+                await self._eventsub.listen_channel_chat_message(uid, uid, self._on_chat)
+                await self._eventsub.listen_channel_chat_message_delete(
+                    uid, uid, self._on_chat_delete
+                )
+                print("[twitch] Reading chat for commands")
+            except Exception as exc:
+                print(f"[twitch] Couldn't subscribe to chat, commands disabled: {exc}")
 
         where = connection_url or "Twitch"
         print(f"[twitch] Listening for {channel} (id {uid}) via {where}")
@@ -222,6 +278,33 @@ class TwitchAlerts:
         await self._broadcast(
             _alert("raid", name, f"{name} is raiding with {e.viewers}!", e.viewers)
         )
+
+    async def _on_chat(self, data: ChannelChatMessageEvent) -> None:
+        if self._on_chat_cb is None:
+            return
+        e = data.event
+        line = ChatLine(
+            message_id=e.message_id,
+            user_id=e.chatter_user_id,
+            login=e.chatter_user_login,
+            name=e.chatter_user_name,
+            text=e.message.text,
+            badges=frozenset(b.set_id for b in (e.badges or [])),
+            source_channel_id=e.source_broadcaster_user_id,
+        )
+        try:
+            await self._on_chat_cb(line)
+        except Exception as exc:
+            # One bad message must not take chat reading down with it.
+            print(f"[chat] handler failed on {line.text!r}: {exc!r}")
+
+    async def _on_chat_delete(self, data: ChannelChatMessageDeleteEvent) -> None:
+        if self._on_chat_delete_cb is None:
+            return
+        try:
+            await self._on_chat_delete_cb(data.event.message_id)
+        except Exception as exc:
+            print(f"[chat] delete handler failed: {exc!r}")
 
     async def _on_redeem(
         self, data: ChannelPointsCustomRewardRedemptionAddEvent
