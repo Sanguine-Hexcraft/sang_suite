@@ -73,6 +73,29 @@ export interface DeathState {
   watching: string | null // the M&M settings folder, or null if not found
 }
 
+// One song request (Phase 13), mirroring SongRequest in backend/songs.py.
+// Only the video id comes over the wire, never a URL: the player builds the
+// embed itself, so chat text can't point it anywhere else.
+export interface SongRequest {
+  request_id: string
+  video_id: string
+  title: string
+  channel: string
+  channel_id: string
+  duration_s: number
+  user: string
+  user_id: string
+  requested_at: number
+}
+
+// The queue as GET /api/songs returns it and `type: 'songs'` pushes carry it.
+// The backend owns it; the overlay only follows `now` and `paused`.
+export interface SongState {
+  now: SongRequest | null
+  queue: SongRequest[]
+  paused: boolean
+}
+
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
 // over HTTP on load, then kept fresh by `type: 'config'` relay messages.
 export interface AlertKindConfig {
@@ -115,6 +138,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const recentEvents = ref<LoggedEvent[]>([])
   const config = ref<AppConfig | null>(null)
   const deaths = ref<DeathState | null>(null)
+  const songs = ref<SongState | null>(null)
   let socket: WebSocket | null = null
   let eventSeq = 0
 
@@ -163,6 +187,17 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   }
 
+  // Like deaths: state, never replayed, so it's fetched on load and again on
+  // every reconnect to catch up on anything that changed while we were away.
+  async function loadSongs() {
+    try {
+      const res = await fetch('/api/songs')
+      if (res.ok) songs.value = await res.json()
+    } catch {
+      // No backend yet; the reconnect will try again.
+    }
+  }
+
   function connect() {
     // Already open or opening? Don't stack a second socket.
     if (socket && socket.readyState !== WebSocket.CLOSED) return
@@ -194,6 +229,13 @@ export const useOverlayStore = defineStore('overlay', () => {
       if (message.type === 'deaths') {
         const { type: _type, ...state } = message
         deaths.value = state
+        return
+      }
+      // The song queue's state pushes: the same treatment, for the same reason.
+      // Without this every request and skip would land in the activity feed.
+      if (message.type === 'songs') {
+        const { type: _type, ...state } = message
+        songs.value = state
         return
       }
       // Track before dispatch so a replayed batch advances the watermark even
@@ -237,9 +279,11 @@ export const useOverlayStore = defineStore('overlay', () => {
     recentEvents,
     config,
     deaths,
+    songs,
     connect,
     loadConfig,
     loadDeaths,
+    loadSongs,
     loadActivity,
     send,
   }

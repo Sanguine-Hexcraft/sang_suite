@@ -4,6 +4,7 @@ import AlertOverlay from '../views/AlertOverlay.vue'
 import MediaOverlay from '../views/MediaOverlay.vue'
 import DeathOverlay from '../views/DeathOverlay.vue'
 import ZoneOverlay from '../views/ZoneOverlay.vue'
+import SongOverlay from '../views/SongOverlay.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -18,6 +19,9 @@ const router = createRouter({
     { path: '/overlay/deaths', component: DeathOverlay },
     // M&M zone banner: a lower-third, its own source pinned to the bottom.
     { path: '/overlay/zone', component: ZoneOverlay },
+    // Song requests (Phase 13): its own source for its own audio, so music
+    // gets a separate OBS mixer fader -- and can be left off the VOD track.
+    { path: '/overlay/song', component: SongOverlay },
   ],
 })
 

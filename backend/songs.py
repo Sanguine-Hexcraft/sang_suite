@@ -209,6 +209,12 @@ class SongQueue:
         # "what's playing" never have to wonder whether index 0 has started.
         self.now: SongRequest | None = None
         self.queue: list[SongRequest] = []
+        # Music stopped on purpose (the panic button, or Pause on the
+        # dashboard). A flag on the queue rather than an event, because it's
+        # state: a browser source that reconnects or reloads mid-pause must
+        # come back paused, not start blaring the song again. Saved for the
+        # same reason across a restart.
+        self.paused = False
         self._load()
 
     # --- persistence --------------------------------------------------------
@@ -224,9 +230,10 @@ class SongQueue:
             saved = json.loads(SONGS_PATH.read_text())
             self.now = SongRequest(**saved["now"]) if saved.get("now") else None
             self.queue = [SongRequest(**r) for r in saved.get("queue", [])]
+            self.paused = bool(saved.get("paused", False))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             print(f"[songs] {SONGS_PATH.name} unusable, starting empty: {exc}")
-            self.now, self.queue = None, []
+            self.now, self.queue, self.paused = None, [], False
 
     def _save(self) -> None:
         try:
@@ -252,6 +259,7 @@ class SongQueue:
         return {
             "now": asdict(self.now) if self.now else None,
             "queue": [asdict(r) for r in self.queue],
+            "paused": self.paused,
         }
 
     # --- requests -----------------------------------------------------------
@@ -366,6 +374,30 @@ class SongQueue:
         self.now = self.queue.pop(0) if self.queue else None
         await self._changed()
         return self.now
+
+    async def ended(self, request_id: str, reason: str) -> bool:
+        """The player says a song is over. Advance only if it's the current one.
+
+        The player quotes the request_id it was playing rather than just saying
+        "next", because more than one copy of the overlay can be open (OBS plus
+        a browser tab you forgot about). Each reports the same song ending; the
+        first one advances the queue and every later one names a song that is
+        no longer `now`, so it's ignored instead of skipping the next song too.
+        """
+        if self.now is None or self.now.request_id != request_id:
+            return False
+        if reason != "ended":
+            # An embed refusal or a stall. Worth a line in the terminal: a
+            # pattern of 150s from one label tells you what to blocklist.
+            print(f"[songs] skipped {self.now.title!r} ({self.now.video_id}): {reason}")
+        await self.skip()
+        return True
+
+    async def set_paused(self, paused: bool) -> None:
+        if self.paused == paused:
+            return
+        self.paused = paused
+        await self._changed()
 
     async def remove(self, request_id: str) -> bool:
         """Remove one request, wherever it is. Removing `now` is a skip."""

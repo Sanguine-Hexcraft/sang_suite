@@ -559,6 +559,11 @@ async def panic():
     reason.
     """
     await manager.broadcast({"type": "panic"})
+    # Music is state on the backend, not just something on screen: pausing
+    # the queue (rather than only telling the overlay to stop) is what keeps a
+    # reloaded song overlay from starting the song again. Resume is a
+    # deliberate act -- POST /api/songs/resume, or the dashboard in 13d.
+    await song_queue.set_paused(True)
     return {"ok": True}
 
 
@@ -613,6 +618,38 @@ async def request_song(body: SongRequestBody):
     if req is None:
         raise HTTPException(status_code=422, detail=reason)
     return {"request": req, "position": song_queue.position(req.request_id)}
+
+
+class SongEndedBody(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    # "ended", "stall" or "error:<YouTube code>". Logged, never trusted for
+    # anything else.
+    reason: str = Field(default="ended", max_length=40)
+
+
+@app.post("/api/songs/ended")
+async def song_ended(body: SongEndedBody):
+    """The song overlay reporting that its song finished or failed.
+
+    The overlay never decides what plays next; it reports, and the backend
+    advances the queue and broadcasts the new state, which the overlay then
+    follows. `advanced: false` means it was stale (another overlay got there
+    first) and nothing changed.
+    """
+    advanced = await song_queue.ended(body.request_id, body.reason)
+    return {"advanced": advanced}
+
+
+@app.post("/api/songs/pause")
+async def pause_songs():
+    await song_queue.set_paused(True)
+    return song_queue.state()
+
+
+@app.post("/api/songs/resume")
+async def resume_songs():
+    await song_queue.set_paused(False)
+    return song_queue.state()
 
 
 @app.post("/api/songs/skip")
