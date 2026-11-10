@@ -10,6 +10,7 @@ how to add it to OBS, and how to tune it. For how the machinery underneath works
 | [Media](#media) | `/overlay/media` | 1920 × 1080 | Channel point redeems |
 | [Death counter](#death-counter) | `/overlay/deaths` | 420 × 180, a corner | M&M deaths, from the Ledger |
 | [Zone banner](#zone-banner) | `/overlay/zone` | 1920 × 300, bottom edge | M&M zone changes, from `Player.log` |
+| Spotify now playing | `/overlay/spotify` | 470 × 200, a corner | The Spotify desktop app, over MPRIS (D-Bus) |
 
 Every URL is on `http://localhost:8000` when streaming (`./stream.sh`), or `:5173` while developing with
 Vite. Each overlay is its own page and its own browser source, so they layer independently in OBS and

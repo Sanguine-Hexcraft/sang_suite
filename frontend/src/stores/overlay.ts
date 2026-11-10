@@ -110,6 +110,29 @@ export interface SongState {
   searches: { day: string; used: number }
 }
 
+// What the Spotify desktop app is playing (Phase 14b), read over MPRIS by
+// backend/spotify.py. Arrives from GET /api/spotify and `type: 'spotify'`
+// pushes, which are only sent when something changes.
+export interface SpotifyTrack {
+  id: string
+  title: string
+  artists: string[]
+  album: string
+  art: string | null // always under https://i.scdn.co/, or null
+  duration_ms: number
+}
+
+export interface SpotifyState {
+  running: boolean // is Spotify open at all
+  playing: boolean
+  track: SpotifyTrack | null
+  // True at the moment the backend sent it. `received` (below) is when that
+  // was, on this page's clock, so the overlay can count forward from there.
+  position_ms: number
+  // Stamped here on arrival, never sent by the backend: performance.now().
+  received: number
+}
+
 // Widget settings, mirroring the Pydantic models in backend/main.py. Fetched
 // over HTTP on load, then kept fresh by `type: 'config'` relay messages.
 export interface AlertKindConfig {
@@ -166,6 +189,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const config = ref<AppConfig | null>(null)
   const deaths = ref<DeathState | null>(null)
   const songs = ref<SongState | null>(null)
+  const spotify = ref<SpotifyState | null>(null)
   let socket: WebSocket | null = null
   let eventSeq = 0
 
@@ -225,6 +249,17 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   }
 
+  // State again, so the same fetch-on-connect as songs. `received` is stamped
+  // when the reply lands: the position in it is "as of now".
+  async function loadSpotify() {
+    try {
+      const res = await fetch('/api/spotify')
+      if (res.ok) spotify.value = { ...(await res.json()), received: performance.now() }
+    } catch {
+      // No backend yet; the reconnect will try again.
+    }
+  }
+
   function connect() {
     // Already open or opening? Don't stack a second socket.
     if (socket && socket.readyState !== WebSocket.CLOSED) return
@@ -263,6 +298,13 @@ export const useOverlayStore = defineStore('overlay', () => {
       if (message.type === 'songs') {
         const { type: _type, ...state } = message
         songs.value = state
+        return
+      }
+      // And Spotify's now-playing: state, not an event. A track change every
+      // three minutes would otherwise bury the activity feed.
+      if (message.type === 'spotify') {
+        const { type: _type, ...state } = message
+        spotify.value = { ...state, received: performance.now() }
         return
       }
       // Track before dispatch so a replayed batch advances the watermark even
@@ -307,10 +349,12 @@ export const useOverlayStore = defineStore('overlay', () => {
     config,
     deaths,
     songs,
+    spotify,
     connect,
     loadConfig,
     loadDeaths,
     loadSongs,
+    loadSpotify,
     loadActivity,
     send,
   }

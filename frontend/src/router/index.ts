@@ -5,6 +5,7 @@ import MediaOverlay from '../views/MediaOverlay.vue'
 import DeathOverlay from '../views/DeathOverlay.vue'
 import ZoneOverlay from '../views/ZoneOverlay.vue'
 import SongOverlay from '../views/SongOverlay.vue'
+import SpotifyOverlay from '../views/SpotifyOverlay.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -22,6 +23,9 @@ const router = createRouter({
     // Song requests (Phase 13): its own source for its own audio, so music
     // gets a separate OBS mixer fader -- and can be left off the VOD track.
     { path: '/overlay/song', component: SongOverlay },
+    // Spotify now-playing (Phase 14b): display only. The sound is the desktop
+    // app's, so this page has no audio of its own.
+    { path: '/overlay/spotify', component: SpotifyOverlay },
   ],
 })
 

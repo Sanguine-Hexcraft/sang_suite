@@ -23,6 +23,7 @@ from commands import ChatCommands
 from ledger import LedgerIngester
 from mnm import DeathWatcher
 from songs import SongQueue
+from spotify import SpotifyWatcher
 from twitch import ChatLine, TwitchAlerts
 from zones import ZoneWatcher
 
@@ -354,7 +355,12 @@ async def lifespan(app: FastAPI):
         zone_watcher.start()
     except Exception as exc:
         print(f"[zones] Startup failed, zone banner disabled: {exc}")
+    try:
+        spotify_watcher.start()
+    except Exception as exc:
+        print(f"[spotify] Startup failed, now-playing disabled: {exc}")
     yield
+    await spotify_watcher.stop()
     await death_watcher.stop()
     await ledger_ingester.stop()
     await zone_watcher.stop()
@@ -519,7 +525,9 @@ class ConnectionManager:
         # leave "Test death" rows in the feed for good.
         # `songs` (the request queue) is state too: the song overlay asks
         # GET /api/songs on connect rather than replaying stale queue snapshots.
-        if message.get("type") not in ("config", "panic", "deaths", "songs") and not message.get("test"):
+        # `spotify` (what the desktop app is playing) likewise: a replayed
+        # track change would show a song that finished minutes ago.
+        if message.get("type") not in ("config", "panic", "deaths", "songs", "spotify") and not message.get("test"):
             self._seq += 1
             # `at` is stamped here rather than in the browser so a restored row
             # shows when the event happened, not when the page loaded it.
@@ -569,7 +577,28 @@ zone_watcher = ZoneWatcher(manager.broadcast)
 chat_bot = ChatBot()
 # A lambda over the module-level `config`, not config.songs itself, so a save
 # from the dashboard takes effect on the very next request.
-song_queue = SongQueue(manager.broadcast, lambda: config.songs)
+async def _songs_broadcast(message: dict) -> None:
+    """The song queue's broadcast, plus a tap on the Spotify watcher's shoulder.
+
+    Every queue change comes through here, so this is where Spotify finds out
+    a request just started (pause now) or the last one just ended (resume),
+    without songs.py having to know Spotify exists.
+    """
+    await manager.broadcast(message)
+    spotify_watcher.nudge()
+
+
+song_queue = SongQueue(_songs_broadcast, lambda: config.songs)
+# Lambdas for the usual reason: they read the queue when called, not now.
+# "Audible" is a request that's on *and* not paused; "idle" is nothing on and
+# not paused -- a paused queue (panic) is neither, so Spotify is left alone.
+spotify_watcher = SpotifyWatcher(
+    manager.broadcast,
+    audible_request=lambda: (
+        song_queue.now.request_id if song_queue.now and not song_queue.paused else None
+    ),
+    queue_idle=lambda: song_queue.now is None and not song_queue.paused,
+)
 chat_commands = ChatCommands(
     song_queue,
     chat_bot.send,
@@ -756,6 +785,12 @@ class ChatTestBody(BaseModel):
     user: str = Field(default="tester", min_length=1, max_length=25)
     # Pretend badges, e.g. ["moderator"] to test !skip.
     badges: list[str] = []
+
+
+@app.get("/api/spotify")
+async def get_spotify():
+    """What Spotify is playing right now, for an overlay that just loaded."""
+    return spotify_watcher.snapshot()
 
 
 @app.post("/api/chat/test")

@@ -1,5 +1,6 @@
 # Backend dependencies. Rebuild the venv on a fresh pull with:
 #   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+dbus-fast==5.2.0
 fastapi[standard]==0.139.2
 httpx==0.28.1
 simpleobsws==1.4.3

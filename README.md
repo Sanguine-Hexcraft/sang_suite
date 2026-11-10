@@ -244,6 +244,7 @@ Add each one as **Sources → Add → Browser Source**.
 | Media | `http://localhost:8000/overlay/media` | 1920 × 1080 | tick **Control audio via OBS** |
 | Death counter | `http://localhost:8000/overlay/deaths` | ~420 × 180 | position it in a corner |
 | Zone banner | `http://localhost:8000/overlay/zone` | 1920 × 300 | pin it to the bottom edge |
+| Spotify now playing | `http://localhost:8000/overlay/spotify` | ~470 × 200 | display only; the sound is the Spotify app's |
 
 In development, use port `5173` instead of `8000`.
 
@@ -509,6 +510,7 @@ frontend/
       MediaOverlay.vue   # /overlay/media
       DeathOverlay.vue   # /overlay/deaths
       ZoneOverlay.vue    # /overlay/zone
+      SpotifyOverlay.vue # /overlay/spotify
     stores/overlay.ts    # Pinia store wrapping the WebSocket, replay watermark
     audio/sounds.ts      # synthesised per-kind jingles
     router/index.ts      # route declarations
@@ -606,6 +608,7 @@ Built in phases following [`notes/obs-overlay-roadmap.md`](notes/obs-overlay-roa
 - [x] **Phase 14**: the M&M death counter, read from the game's Ledger
 - [x] **M&M, continued**: Ledger history in SQLite, level-up alerts, the zone banner
 - [x] **Phase 13**: song requests (`!sr <youtube link>` in chat, played in its own overlay, run from a dashboard card)
+- [x] **Phase 14b**: Spotify now-playing overlay, read from the desktop app over MPRIS; pauses for song requests
 - [ ] **Phase 15**: loot boxes
 
 ### Known gaps
